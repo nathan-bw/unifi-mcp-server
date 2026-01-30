@@ -1,0 +1,33 @@
+{
+  "name": "unifi-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for UniFi Network Management with Google OAuth",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "mcp",
+    "unifi",
+    "network",
+    "ubiquiti",
+    "oauth"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "express-session": "^1.18.0",
+    "node-unifi": "^2.5.1",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0",
+    "zod": "^4.3.6"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

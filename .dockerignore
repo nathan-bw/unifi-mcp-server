@@ -1,0 +1,32 @@
+# Dependencies (will be installed in container)
+node_modules/
+
+# Environment files (mounted separately)
+.env
+.env.*
+!.env.example
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Documentation (not needed in container)
+README.md
+SETUP.md
+*.md
+
+# Development files
+*.test.js
+*.spec.js
