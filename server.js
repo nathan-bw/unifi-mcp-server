@@ -33,7 +33,8 @@ const UNIFI_PORT = parseInt(process.env.UNIFI_PORT || '443', 10);
 const UNIFI_USERNAME = process.env.UNIFI_USERNAME;
 const UNIFI_PASSWORD = process.env.UNIFI_PASSWORD;
 const UNIFI_SITE = process.env.UNIFI_SITE || 'default';
-const UNIFI_ENABLED = UNIFI_HOST && UNIFI_USERNAME && UNIFI_PASSWORD;
+// SECURITY: Must use !! to coerce to boolean - otherwise && returns the password string
+const UNIFI_ENABLED = Boolean(UNIFI_HOST && UNIFI_USERNAME && UNIFI_PASSWORD);
 
 // Startup info
 console.log('');
@@ -372,12 +373,15 @@ const transports = new Map();
 // OAuth 2.1 Routes (via mcp-oauth-server)
 // =============================================================================
 
-// Mount OAuth router at root (provides /.well-known/oauth-*, /oauth/authorize, /oauth/token, etc.)
+// Mount OAuth router at root (provides /.well-known/oauth-*, /authorize, /token, etc.)
 app.use(mcpAuthRouter({
   provider: oauthServer,
   issuerUrl: new URL(BASE_URL),
-  baseUrl: new URL(`${BASE_URL}/oauth`),
+  resourceServerUrl: new URL(`${BASE_URL}/mcp`),
   scopesSupported: ['mcp:tools', 'mcp:read', 'mcp:write'],
+  clientRegistrationOptions: {
+    clientIdGeneration: true,
+  },
 }));
 
 // =============================================================================
@@ -534,12 +538,21 @@ app.post('/consent/deny', (req, res) => {
 // =============================================================================
 
 app.get('/health', (req, res) => {
-  res.json({
+  // SECURITY: Explicitly coerce to booleans to prevent accidental secret leakage
+  const response = {
     status: 'ok',
     timestamp: new Date().toISOString(),
-    unifiEnabled: UNIFI_ENABLED,
+    unifiEnabled: UNIFI_ENABLED === true,
     oauthEnabled: true,
-  });
+  };
+  // Runtime assertion: fail if any value is a string (potential secret leak)
+  for (const [key, value] of Object.entries(response)) {
+    if (typeof value === 'string' && key !== 'status' && key !== 'timestamp') {
+      console.error(`SECURITY: Health endpoint would leak string value for '${key}'`);
+      return res.status(500).json({ status: 'error', message: 'Internal configuration error' });
+    }
+  }
+  res.json(response);
 });
 
 app.get('/', (req, res) => {
@@ -576,10 +589,10 @@ app.get('/', (req, res) => {
       <h2>OAuth 2.1 Endpoints</h2>
       <table>
         <tr><td><code>/.well-known/oauth-authorization-server</code></td><td>Authorization server metadata</td></tr>
-        <tr><td><code>/.well-known/oauth-protected-resource</code></td><td>Protected resource metadata</td></tr>
-        <tr><td><code>/oauth/authorize</code></td><td>Authorization endpoint</td></tr>
-        <tr><td><code>/oauth/token</code></td><td>Token endpoint</td></tr>
-        <tr><td><code>/oauth/register</code></td><td>Dynamic client registration</td></tr>
+        <tr><td><code>/.well-known/oauth-protected-resource/mcp</code></td><td>Protected resource metadata</td></tr>
+        <tr><td><code>/authorize</code></td><td>Authorization endpoint</td></tr>
+        <tr><td><code>/token</code></td><td>Token endpoint</td></tr>
+        <tr><td><code>/register</code></td><td>Dynamic client registration</td></tr>
       </table>
 
       <h2>MCP Endpoint</h2>
