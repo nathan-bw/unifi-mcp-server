@@ -18,11 +18,10 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=${PORT:-3000}
-      - SESSION_SECRET=${SESSION_SECRET}
-      # Google OAuth
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - OAUTH_CALLBACK_URL=${OAUTH_CALLBACK_URL}
+      - BASE_URL=${BASE_URL:-http://localhost:3000}
+      # Cloudflare Access (optional)
+      - CF_ACCESS_TEAM=${CF_ACCESS_TEAM}
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD}
       - ALLOWED_EMAILS=${ALLOWED_EMAILS}
       # UniFi Controller
       - UNIFI_HOST=${UNIFI_HOST}

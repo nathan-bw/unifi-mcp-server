@@ -1,186 +1,210 @@
 # UniFi MCP Server - Setup Guide
 
-This guide walks you through setting up the UniFi MCP Server with Google OAuth authentication and Cloudflare Tunnel access.
+This guide walks you through setting up the UniFi MCP Server with OAuth 2.1 and Cloudflare Access authentication.
 
 ## Prerequisites
 
-- [ ] Docker and Docker Compose installed
-- [ ] UniFi Dream Machine/Controller on your local network
-- [ ] Google Cloud account (for OAuth)
-- [ ] Existing Cloudflare Tunnel (you mentioned you have this already)
+- Docker and Docker Compose installed
+- UniFi Dream Machine/Controller on your local network
+- Cloudflare account with a domain
+- Cloudflare Tunnel configured (or ability to create one)
 
 ---
 
-## Step 1: Create Environment File
+## Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/nathan-bw/unifi-mcp-server.git
+cd unifi-mcp-server
+```
+
+---
+
+## Step 2: Configure UniFi Credentials
+
+### 2.1 Create a UniFi Admin Account (Recommended)
+
+Create a dedicated local admin account for the MCP server:
+
+1. Log into your UniFi Controller
+2. Go to **Settings** → **Admins**
+3. Click **Add Admin**
+4. Create a local account (not cloud/SSO):
+   - Username: `mcp-server`
+   - Password: (generate a strong password)
+   - Role: Admin (or a limited role if you prefer)
+5. Save the credentials
+
+### 2.2 Create Environment File
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` in your editor and fill in the values (see sections below).
-
----
-
-## Step 2: Generate Session Secret
-
-Generate a secure random secret:
+Edit `.env` with your settings:
 
 ```bash
-openssl rand -hex 32
-```
+# Server Settings
+PORT=3000
+BASE_URL=http://localhost:3000  # Change to your Cloudflare URL in production
 
-Copy the output to `SESSION_SECRET` in your `.env` file.
-
----
-
-## Step 3: Configure UniFi Controller
-
-In your `.env` file, set:
-
-```bash
-UNIFI_HOST=192.168.1.1        # Your Dream Machine IP
-UNIFI_PORT=443                # Usually 443 for UDM
-UNIFI_USERNAME=your-admin     # UniFi admin username
-UNIFI_PASSWORD=your-password  # UniFi admin password
+# UniFi Controller Settings
+UNIFI_HOST=192.168.1.1        # Your Dream Machine/Controller IP
+UNIFI_PORT=443                # Usually 443
+UNIFI_USERNAME=mcp-server     # The admin username you created
+UNIFI_PASSWORD=your-password  # The admin password
 UNIFI_SITE=default            # Usually "default"
-```
 
-**Note:** Create a dedicated local admin account on your UniFi controller for this server.
+# Optional: Cloudflare Access Settings
+# CF_ACCESS_TEAM=myteam       # Your Cloudflare Access team name
+# ALLOWED_EMAILS=             # Comma-separated list of allowed emails
+```
 
 ---
 
-## Step 4: Set Up Google OAuth
+## Step 3: Test Locally
 
-### 4.1 Create Google Cloud Project
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (e.g., "UniFi MCP Server")
-3. Select the project
-
-### 4.2 Configure OAuth Consent Screen
-
-1. Go to **APIs & Services** → **OAuth consent screen**
-2. Select **External** (or Internal if using Google Workspace)
-3. Fill in required fields:
-   - App name: "UniFi MCP Server"
-   - User support email: your email
-   - Developer contact: your email
-4. Click **Save and Continue**
-5. Skip Scopes (we only need email/profile which are default)
-6. Add your email as a test user if using External
-7. **Save and Continue** until complete
-
-### 4.3 Create OAuth Credentials
-
-1. Go to **APIs & Services** → **Credentials**
-2. Click **+ CREATE CREDENTIALS** → **OAuth client ID**
-3. Application type: **Web application**
-4. Name: "UniFi MCP Server"
-5. **Authorized redirect URIs** - Add BOTH:
-   - `http://localhost:3000/auth/google/callback` (for local testing)
-   - `https://YOUR-TUNNEL-DOMAIN.com/auth/google/callback` (for production)
-6. Click **Create**
-7. Copy the **Client ID** and **Client Secret**
-
-### 4.4 Update .env
+Start the server to verify everything works:
 
 ```bash
-GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-client-secret
-OAUTH_CALLBACK_URL=https://YOUR-TUNNEL-DOMAIN.com/auth/google/callback
-ALLOWED_EMAILS=your-email@gmail.com
+docker compose up -d
+docker compose logs -f
 ```
 
-**Important:** The `OAUTH_CALLBACK_URL` must match exactly what you added in Google Console.
+You should see:
+```
+  Port:       3000
+  Base URL:   http://localhost:3000
+  UniFi:      192.168.1.1
+  OAuth:      Enabled (mcp-oauth-server)
+```
 
----
-
-## Step 5: Configure Cloudflare Tunnel
-
-Since you already have a Cloudflare Tunnel, add a public hostname:
-
-1. Go to [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
-2. Navigate to **Networks** → **Tunnels**
-3. Select your tunnel → **Configure**
-4. Add a **Public Hostname**:
-   - **Subdomain**: e.g., `unifi-mcp`
-   - **Domain**: your domain
-   - **Service**: `http://localhost:3000` (or your Docker host IP)
-
-The MCP server will be accessible at: `https://unifi-mcp.yourdomain.com`
-
----
-
-## Step 6: Start the Server
-
-### Option A: Docker Compose (Recommended)
-
+Test the OAuth metadata endpoint:
 ```bash
-# Build and start
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop
-docker-compose down
+curl http://localhost:3000/.well-known/oauth-authorization-server
 ```
 
-### Option B: Local Development
-
-```bash
-# Install dependencies
-npm install
-
-# Start server
-npm start
-
-# Or with hot-reload
-npm run dev
-```
-
----
-
-## Step 7: Test the Setup
-
-### 7.1 Test Health Endpoint
-
+Test the health endpoint:
 ```bash
 curl http://localhost:3000/health
 ```
 
-Expected: `{"status":"ok",...,"authEnabled":true,"unifiEnabled":true}`
+Visit `http://localhost:3000` to see the dashboard.
 
-### 7.2 Test OAuth Flow
+---
 
-1. Open `http://localhost:3000` in browser
-2. Click "Login with Google"
-3. Complete Google sign-in
-4. Should redirect to dashboard showing your email
+## Step 4: Set Up Cloudflare Tunnel
 
-### 7.3 Test via Cloudflare Tunnel
+### 4.1 Create a Tunnel
 
-1. Open `https://unifi-mcp.yourdomain.com`
-2. Complete OAuth flow
-3. Verify dashboard loads
-
-### 7.4 Test MCP Connection
-
-After OAuth login, test the MCP endpoint:
+1. Go to [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
+2. Navigate to **Networks** → **Tunnels**
+3. Click **Create a tunnel**
+4. Choose **Cloudflared** connector
+5. Name it (e.g., `unifi-mcp`)
+6. Install cloudflared on your server:
 
 ```bash
-curl -X POST https://unifi-mcp.yourdomain.com/mcp \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Cookie: connect.sid=YOUR_SESSION_COOKIE" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+# Download cloudflared for ARM64 (Raspberry Pi)
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 -o cloudflared
+chmod +x cloudflared
+sudo mv cloudflared /usr/local/bin/
+
+# Authenticate (follow the browser prompt)
+cloudflared tunnel login
+
+# Create and configure the tunnel
+cloudflared tunnel create unifi-mcp
+```
+
+### 4.2 Configure the Tunnel
+
+Create `/etc/cloudflared/config.yml`:
+
+```yaml
+tunnel: <your-tunnel-id>
+credentials-file: /root/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: unifi-mcp.yourdomain.com
+    service: http://localhost:3000
+  - service: http_status:404
+```
+
+### 4.3 Run as a Service
+
+```bash
+sudo cloudflared service install
+sudo systemctl start cloudflared
+sudo systemctl enable cloudflared
 ```
 
 ---
 
-## Step 8: Configure Claude Desktop
+## Step 5: Set Up Cloudflare Access
 
-Add to your Claude Desktop config (`~/.claude/claude_desktop_config.json`):
+### 5.1 Create an Access Application
+
+1. In Zero Trust Dashboard, go to **Access** → **Applications**
+2. Click **Add an application**
+3. Select **Self-hosted**
+4. Configure:
+   - **Application name**: UniFi MCP Server
+   - **Session duration**: 24 hours (or your preference)
+   - **Application domain**: `unifi-mcp.yourdomain.com`
+5. Click **Next**
+
+### 5.2 Create an Access Policy
+
+1. **Policy name**: Allow authorized users
+2. **Action**: Allow
+3. **Include rules** - choose one or more:
+   - **Emails**: specific email addresses
+   - **Email domains**: `@yourdomain.com`
+   - **Identity provider groups**: if using IdP groups
+4. Click **Next** → **Add application**
+
+### 5.3 How It Works
+
+Cloudflare Access automatically adds the `Cf-Access-Authenticated-User-Email` header to requests that pass authentication. The MCP server uses this header on the consent page to identify users during the OAuth flow.
+
+---
+
+## Step 6: Configure Production Settings
+
+Update your `.env` file with your Cloudflare URL:
+
+```bash
+# Production settings
+BASE_URL=https://unifi-mcp.yourdomain.com
+
+# Optional: Cloudflare Access team for validation
+CF_ACCESS_TEAM=myteam
+
+# Optional: Restrict to specific emails
+ALLOWED_EMAILS=user1@example.com,user2@example.com
+```
+
+Restart the server:
+```bash
+docker compose down
+docker compose up -d
+```
+
+---
+
+## Step 7: Connect MCP Clients
+
+### Cloudflare MCP Portal
+
+1. Go to the [Cloudflare MCP Portal](https://developers.cloudflare.com/mcp)
+2. Add your server URL: `https://unifi-mcp.yourdomain.com/mcp`
+3. The portal will discover OAuth endpoints automatically
+4. Follow the OAuth flow to authorize
+
+### Claude Desktop (with OAuth)
+
+Add to `~/.claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -192,60 +216,116 @@ Add to your Claude Desktop config (`~/.claude/claude_desktop_config.json`):
 }
 ```
 
-**Note:** Claude Desktop will need to handle the OAuth flow. You may need to authenticate in a browser first and ensure your session cookie is valid.
+Claude will detect the OAuth requirement and guide you through authentication.
+
+### Manual OAuth Flow
+
+For testing or custom clients:
+
+1. **Discover endpoints**:
+   ```bash
+   curl https://unifi-mcp.yourdomain.com/.well-known/oauth-authorization-server
+   ```
+
+2. **Register client** (if needed):
+   ```bash
+   curl -X POST https://unifi-mcp.yourdomain.com/oauth/register \
+     -H "Content-Type: application/json" \
+     -d '{"client_name": "My Client", "redirect_uris": ["http://localhost:8080/callback"]}'
+   ```
+
+3. **Start OAuth flow** - redirect user to:
+   ```
+   https://unifi-mcp.yourdomain.com/oauth/authorize?
+     client_id=<client_id>&
+     redirect_uri=<redirect_uri>&
+     response_type=code&
+     code_challenge=<challenge>&
+     code_challenge_method=S256&
+     scope=mcp:tools
+   ```
+
+4. **Exchange code for token**:
+   ```bash
+   curl -X POST https://unifi-mcp.yourdomain.com/oauth/token \
+     -d "grant_type=authorization_code&code=<code>&redirect_uri=<uri>&code_verifier=<verifier>"
+   ```
+
+5. **Access MCP endpoint**:
+   ```bash
+   curl https://unifi-mcp.yourdomain.com/mcp \
+     -H "Authorization: Bearer <access_token>"
+   ```
 
 ---
 
 ## Troubleshooting
 
-### "Authentication required" error
-- Ensure you've completed the Google OAuth flow in a browser
-- Check that your email is in `ALLOWED_EMAILS`
-
 ### "UniFi controller not configured"
-- Verify `UNIFI_HOST`, `UNIFI_USERNAME`, `UNIFI_PASSWORD` are set
-- Ensure the Docker container can reach your UniFi controller IP
+- Verify `UNIFI_HOST`, `UNIFI_USERNAME`, `UNIFI_PASSWORD` are set in `.env`
+- Ensure the server can reach the UniFi controller IP
 
-### OAuth redirect errors
-- Verify `OAUTH_CALLBACK_URL` matches exactly in both `.env` and Google Console
-- Check both `http://` and `https://` variants are added if testing locally
+### OAuth flow issues
+- Verify `BASE_URL` matches your actual server URL (including https://)
+- Check the OAuth metadata: `curl <BASE_URL>/.well-known/oauth-authorization-server`
+- Check server logs: `docker compose logs -f`
+
+### "Authentication Required" on consent page
+- This appears when not behind Cloudflare Access
+- For development, a "Continue without auth" button is available
+- In production, ensure you're accessing via Cloudflare tunnel
+
+### "Access Denied" on consent page
+- Your email is not in the `ALLOWED_EMAILS` list
+- Either add your email to the list or clear the variable to allow all
 
 ### Connection refused to UniFi
-- UniFi controller must be reachable from Docker network
-- Try: `docker exec unifi-mcp-server ping YOUR_UNIFI_IP`
-- For Docker Desktop on Mac, use host.docker.internal or the actual IP
+- Verify the UniFi controller IP is correct
+- For Docker on Raspberry Pi, the container should be able to reach local IPs
+- Test with: `docker exec unifi-mcp-server ping <UNIFI_IP>`
 
-### Docker networking issues on Mac
-If the container can't reach your UniFi controller:
-
-```yaml
-# In docker-compose.yml, add:
-services:
-  unifi-mcp-server:
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-```
-
-Then use `host.docker.internal` as `UNIFI_HOST` if your controller is on the same machine.
+### Cloudflare Tunnel not connecting
+- Check tunnel status: `cloudflared tunnel info <tunnel-name>`
+- View logs: `sudo journalctl -u cloudflared -f`
 
 ---
 
-## Security Recommendations
+## Security Architecture
 
-1. **Use strong session secret** - Generate with `openssl rand -hex 32`
-2. **Limit allowed emails** - Only add trusted emails to `ALLOWED_EMAILS`
-3. **Create dedicated UniFi account** - Don't use your main admin account
-4. **Use Cloudflare Access** - Add additional layer of protection via Cloudflare Access policies
-5. **Monitor access logs** - Check `docker-compose logs` regularly
+This server implements two layers of security:
+
+### Layer 1: Cloudflare Access (Edge)
+- Authentication happens at Cloudflare's edge before reaching your server
+- Supports multiple identity providers (Google, GitHub, Okta, SAML, etc.)
+- DDoS protection and WAF included
+- No direct exposure of your server to the internet
+
+### Layer 2: OAuth 2.1 (MCP Protocol)
+- Full OAuth 2.1 compliance for MCP client authorization
+- PKCE (Proof Key for Code Exchange) required for all flows
+- Dynamic client registration
+- Token refresh support
+
+### Recommendations
+
+1. **Create dedicated UniFi account** - Don't use your main admin account
+2. **Use Cloudflare Access policies** - Restrict by email, IP, or identity provider
+3. **Enable email allowlist** - Set `ALLOWED_EMAILS` for additional server-side validation
+4. **Monitor access logs** - Check `docker compose logs` regularly
+5. **Keep tokens secure** - OAuth tokens provide full access to your UniFi network
 
 ---
 
 ## Quick Reference
 
-| URL | Purpose |
-|-----|---------|
-| `/` | Dashboard |
-| `/health` | Health check (no auth) |
-| `/auth/google` | Start OAuth flow |
-| `/logout` | End session |
-| `/mcp` | MCP endpoint (requires auth) |
+| URL | Purpose | Auth Required |
+|-----|---------|---------------|
+| `/` | Dashboard | No (shows status) |
+| `/health` | Health check | No |
+| `/.well-known/oauth-authorization-server` | OAuth metadata | No |
+| `/.well-known/oauth-protected-resource` | Resource metadata | No |
+| `/oauth/authorize` | Start OAuth flow | Cloudflare Access |
+| `/oauth/token` | Token exchange | No (uses client credentials) |
+| `/oauth/register` | Client registration | No |
+| `/consent` | User consent page | Cloudflare Access |
+| `/mcp` | MCP endpoint | OAuth Bearer token |
