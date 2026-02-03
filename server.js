@@ -3,12 +3,12 @@
  *
  * A Model Context Protocol server for managing UniFi networks.
  * Uses Streamable HTTP transport for remote access.
- * Runs behind Cloudflare Tunnel + Access (Cloudflare handles all auth).
+ * OAuth 2.1 with Cloudflare Access for SaaS as the identity provider.
  */
 
 import 'dotenv/config';
 import express from 'express';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
@@ -21,10 +21,20 @@ import Unifi from 'node-unifi';
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-// Cloudflare Access configuration
-const CF_ACCESS_TEAM = process.env.CF_ACCESS_TEAM; // e.g., 'myteam' for myteam.cloudflareaccess.com
-const CF_ACCESS_AUD = process.env.CF_ACCESS_AUD; // Application Audience (AUD) tag
-const ALLOWED_EMAILS = (process.env.ALLOWED_EMAILS || '').split(',').map(e => e.trim().toLowerCase()).filter(Boolean);
+// Cloudflare Access for SaaS (OIDC) configuration
+const CF_ACCESS_TEAM = process.env.CF_ACCESS_TEAM; // e.g., 'breezywillow'
+const CF_CLIENT_ID = process.env.CF_CLIENT_ID; // From Access for SaaS app
+const CF_CLIENT_SECRET = process.env.CF_CLIENT_SECRET; // From Access for SaaS app
+
+// Derived Cloudflare OIDC endpoints
+const CF_ISSUER = CF_ACCESS_TEAM && CF_CLIENT_ID
+  ? `https://${CF_ACCESS_TEAM}.cloudflareaccess.com/cdn-cgi/access/sso/oidc/${CF_CLIENT_ID}`
+  : null;
+const CF_AUTH_URL = CF_ISSUER ? `${CF_ISSUER}/authorization` : null;
+const CF_TOKEN_URL = CF_ISSUER ? `${CF_ISSUER}/token` : null;
+const CF_USERINFO_URL = CF_ISSUER ? `${CF_ISSUER}/userinfo` : null;
+
+const OAUTH_ENABLED = Boolean(CF_ACCESS_TEAM && CF_CLIENT_ID && CF_CLIENT_SECRET);
 
 // UniFi configuration
 const UNIFI_HOST = process.env.UNIFI_HOST;
@@ -32,7 +42,6 @@ const UNIFI_PORT = parseInt(process.env.UNIFI_PORT || '443', 10);
 const UNIFI_USERNAME = process.env.UNIFI_USERNAME;
 const UNIFI_PASSWORD = process.env.UNIFI_PASSWORD;
 const UNIFI_SITE = process.env.UNIFI_SITE || 'default';
-// SECURITY: Must use !! to coerce to boolean - otherwise && returns the password string
 const UNIFI_ENABLED = Boolean(UNIFI_HOST && UNIFI_USERNAME && UNIFI_PASSWORD);
 
 // Startup info
@@ -40,8 +49,8 @@ console.log('');
 console.log('='.repeat(50));
 console.log('  UniFi MCP Server - Starting');
 console.log('='.repeat(50));
-if (!CF_ACCESS_TEAM) {
-  console.warn('⚠️  CF_ACCESS_TEAM not set. Cloudflare Access integration disabled.');
+if (!OAUTH_ENABLED) {
+  console.warn('⚠️  OAuth not configured. Set CF_ACCESS_TEAM, CF_CLIENT_ID, CF_CLIENT_SECRET.');
 }
 if (!UNIFI_ENABLED) {
   console.warn('⚠️  UniFi controller not configured. UniFi tools will return errors.');
@@ -354,20 +363,276 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Store for MCP transports
+// Store for MCP transports, OAuth state
 const transports = new Map();
+const registeredClients = new Map(); // client_id -> { client_secret, redirect_uris }
+const authCodes = new Map(); // code -> { client_id, user, redirect_uri, code_challenge, expires }
+const accessTokens = new Map(); // token -> { client_id, user, expires }
+const pendingAuth = new Map(); // state -> { client_id, redirect_uri, code_challenge, code_challenge_method }
 
 // =============================================================================
-// Health Endpoint
+// OAuth 2.1 Discovery Endpoint
+// =============================================================================
+
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  res.json({
+    issuer: BASE_URL,
+    authorization_endpoint: `${BASE_URL}/authorize`,
+    token_endpoint: `${BASE_URL}/token`,
+    registration_endpoint: `${BASE_URL}/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    code_challenge_methods_supported: ['S256'],
+    token_endpoint_auth_methods_supported: ['client_secret_post', 'none'],
+    scopes_supported: ['openid', 'profile', 'email', 'mcp:tools'],
+  });
+});
+
+// =============================================================================
+// OAuth 2.1 Dynamic Client Registration
+// =============================================================================
+
+app.post('/register', (req, res) => {
+  const { redirect_uris, client_name } = req.body;
+
+  if (!redirect_uris || !Array.isArray(redirect_uris) || redirect_uris.length === 0) {
+    return res.status(400).json({ error: 'invalid_request', error_description: 'redirect_uris required' });
+  }
+
+  const client_id = randomUUID();
+  const client_secret = randomUUID();
+
+  registeredClients.set(client_id, {
+    client_secret,
+    redirect_uris,
+    client_name: client_name || 'Unknown Client',
+    created: Date.now(),
+  });
+
+  console.log(`[OAuth] Registered client: ${client_name || client_id}`);
+
+  res.status(201).json({
+    client_id,
+    client_secret,
+    redirect_uris,
+    client_name,
+  });
+});
+
+// =============================================================================
+// OAuth 2.1 Authorization Endpoint
+// =============================================================================
+
+app.get('/authorize', (req, res) => {
+  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope, response_type } = req.query;
+
+  // Validate client
+  const client = registeredClients.get(client_id);
+  if (!client) {
+    return res.status(400).json({ error: 'invalid_client', error_description: 'Unknown client_id' });
+  }
+
+  // Validate redirect_uri
+  if (!client.redirect_uris.includes(redirect_uri)) {
+    return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' });
+  }
+
+  // Require PKCE
+  if (!code_challenge || code_challenge_method !== 'S256') {
+    return res.status(400).json({ error: 'invalid_request', error_description: 'PKCE with S256 required' });
+  }
+
+  if (!OAUTH_ENABLED) {
+    // Dev mode: auto-approve
+    const code = randomUUID();
+    authCodes.set(code, {
+      client_id,
+      user: 'dev@localhost',
+      redirect_uri,
+      code_challenge,
+      expires: Date.now() + 10 * 60 * 1000,
+    });
+    const redirectUrl = new URL(redirect_uri);
+    redirectUrl.searchParams.set('code', code);
+    if (state) redirectUrl.searchParams.set('state', state);
+    return res.redirect(redirectUrl.toString());
+  }
+
+  // Store pending auth and redirect to Cloudflare
+  const authState = randomUUID();
+  pendingAuth.set(authState, {
+    client_id,
+    redirect_uri,
+    code_challenge,
+    code_challenge_method,
+    original_state: state,
+    expires: Date.now() + 10 * 60 * 1000,
+  });
+
+  // Redirect to Cloudflare Access
+  const cfAuthUrl = new URL(CF_AUTH_URL);
+  cfAuthUrl.searchParams.set('client_id', CF_CLIENT_ID);
+  cfAuthUrl.searchParams.set('response_type', 'code');
+  cfAuthUrl.searchParams.set('redirect_uri', `${BASE_URL}/callback`);
+  cfAuthUrl.searchParams.set('scope', 'openid email profile');
+  cfAuthUrl.searchParams.set('state', authState);
+
+  console.log(`[OAuth] Redirecting to Cloudflare Access for auth`);
+  res.redirect(cfAuthUrl.toString());
+});
+
+// =============================================================================
+// OAuth 2.1 Callback (from Cloudflare Access)
+// =============================================================================
+
+app.get('/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+
+  if (error) {
+    console.error(`[OAuth] Cloudflare returned error: ${error}`);
+    return res.status(400).json({ error });
+  }
+
+  const pending = pendingAuth.get(state);
+  if (!pending || pending.expires < Date.now()) {
+    pendingAuth.delete(state);
+    return res.status(400).json({ error: 'invalid_state', error_description: 'Invalid or expired state' });
+  }
+  pendingAuth.delete(state);
+
+  try {
+    // Exchange code with Cloudflare for tokens
+    const tokenResponse = await fetch(CF_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: CF_CLIENT_ID,
+        client_secret: CF_CLIENT_SECRET,
+        code,
+        redirect_uri: `${BASE_URL}/callback`,
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const err = await tokenResponse.text();
+      console.error(`[OAuth] Cloudflare token error: ${err}`);
+      return res.status(400).json({ error: 'token_exchange_failed' });
+    }
+
+    const tokens = await tokenResponse.json();
+
+    // Get user info from Cloudflare
+    const userResponse = await fetch(CF_USERINFO_URL, {
+      headers: { Authorization: `Bearer ${tokens.access_token}` },
+    });
+    const userInfo = userResponse.ok ? await userResponse.json() : { email: 'unknown' };
+
+    console.log(`[OAuth] Authenticated user: ${userInfo.email}`);
+
+    // Generate our own auth code for the MCP client
+    const mcpCode = randomUUID();
+    authCodes.set(mcpCode, {
+      client_id: pending.client_id,
+      user: userInfo.email,
+      redirect_uri: pending.redirect_uri,
+      code_challenge: pending.code_challenge,
+      expires: Date.now() + 10 * 60 * 1000,
+    });
+
+    // Redirect back to MCP client
+    const redirectUrl = new URL(pending.redirect_uri);
+    redirectUrl.searchParams.set('code', mcpCode);
+    if (pending.original_state) redirectUrl.searchParams.set('state', pending.original_state);
+
+    res.redirect(redirectUrl.toString());
+  } catch (err) {
+    console.error(`[OAuth] Callback error: ${err.message}`);
+    res.status(500).json({ error: 'internal_error' });
+  }
+});
+
+// =============================================================================
+// OAuth 2.1 Token Endpoint
+// =============================================================================
+
+app.post('/token', (req, res) => {
+  const { grant_type, code, redirect_uri, client_id, client_secret, code_verifier } = req.body;
+
+  if (grant_type !== 'authorization_code') {
+    return res.status(400).json({ error: 'unsupported_grant_type' });
+  }
+
+  // Validate auth code
+  const authCode = authCodes.get(code);
+  if (!authCode || authCode.expires < Date.now()) {
+    authCodes.delete(code);
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'Invalid or expired code' });
+  }
+
+  // Validate client
+  if (authCode.client_id !== client_id) {
+    return res.status(400).json({ error: 'invalid_client' });
+  }
+
+  // Validate PKCE
+  const expectedChallenge = createHash('sha256').update(code_verifier).digest('base64url');
+  if (expectedChallenge !== authCode.code_challenge) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'Invalid code_verifier' });
+  }
+
+  authCodes.delete(code);
+
+  // Issue access token
+  const access_token = randomUUID();
+  accessTokens.set(access_token, {
+    client_id,
+    user: authCode.user,
+    expires: Date.now() + 3600 * 1000, // 1 hour
+  });
+
+  console.log(`[OAuth] Issued token for user: ${authCode.user}`);
+
+  res.json({
+    access_token,
+    token_type: 'Bearer',
+    expires_in: 3600,
+  });
+});
+
+// =============================================================================
+// Token Validation Middleware
+// =============================================================================
+
+function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'invalid_token', error_description: 'Missing Authorization header' });
+  }
+
+  const token = authHeader.slice(7);
+  const tokenData = accessTokens.get(token);
+
+  if (!tokenData || tokenData.expires < Date.now()) {
+    accessTokens.delete(token);
+    return res.status(401).json({ error: 'invalid_token', error_description: 'Invalid or expired token' });
+  }
+
+  req.user = tokenData.user;
+  next();
+}
+
+// =============================================================================
+// Health Endpoint (public)
 // =============================================================================
 
 app.get('/health', (req, res) => {
-  const cfEmail = req.headers['cf-access-authenticated-user-email'];
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     unifiEnabled: UNIFI_ENABLED === true,
-    cfAuthenticated: Boolean(cfEmail),
+    oauthEnabled: OAUTH_ENABLED === true,
   });
 });
 
@@ -433,13 +698,12 @@ app.get('/', (req, res) => {
 });
 
 // =============================================================================
-// MCP Endpoint (Protected by Cloudflare Access at edge)
+// MCP Endpoint (Protected by OAuth 2.1)
 // =============================================================================
 
-app.all('/mcp', async (req, res) => {
-  // Cloudflare Access handles auth - we just log the user
-  const cfEmail = req.headers['cf-access-authenticated-user-email'] || 'anonymous';
-  console.log(`[MCP] ${req.method} request from ${cfEmail}`);
+app.all('/mcp', requireAuth, async (req, res) => {
+  const user = req.user || 'anonymous';
+  console.log(`[MCP] ${req.method} request from ${user}`);
 
   const mcpSessionId = req.headers['mcp-session-id'];
 
@@ -456,7 +720,7 @@ app.all('/mcp', async (req, res) => {
 
     if (body?.method === 'initialize') {
       const newSessionId = randomUUID();
-      console.log(`[MCP] New session: ${newSessionId} for user: ${cfEmail}`);
+      console.log(`[MCP] New session: ${newSessionId} for user: ${user}`);
 
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => newSessionId,
@@ -508,10 +772,12 @@ app.listen(PORT, () => {
   console.log(`  Port:       ${PORT}`);
   console.log(`  Base URL:   ${BASE_URL}`);
   console.log(`  UniFi:      ${UNIFI_ENABLED ? 'Configured' : 'NOT CONFIGURED'}`);
-  console.log(`  Auth:       Cloudflare Access (external)`);
+  console.log(`  OAuth:      ${OAUTH_ENABLED ? 'Cloudflare Access for SaaS' : 'NOT CONFIGURED (dev mode)'}`);
   console.log('');
-  console.log(`  Health:     ${BASE_URL}/health`);
-  console.log(`  MCP:        ${BASE_URL}/mcp`);
+  console.log(`  Endpoints:`);
+  console.log(`    Health:     ${BASE_URL}/health`);
+  console.log(`    OAuth Meta: ${BASE_URL}/.well-known/oauth-authorization-server`);
+  console.log(`    MCP:        ${BASE_URL}/mcp`);
   console.log('='.repeat(50));
   console.log('');
 });
