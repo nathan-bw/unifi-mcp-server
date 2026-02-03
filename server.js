@@ -3,7 +3,7 @@
  *
  * A Model Context Protocol server for managing UniFi networks.
  * Uses Streamable HTTP transport for remote access.
- * Implements OAuth 2.1 with Cloudflare Access as the identity provider.
+ * Runs behind Cloudflare Tunnel + Access (Cloudflare handles all auth).
  */
 
 import 'dotenv/config';
@@ -13,7 +13,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import Unifi from 'node-unifi';
-import { OAuthServer, mcpAuthRouter, authenticateHandler, requireBearerAuth } from 'mcp-oauth-server';
 
 // =============================================================================
 // Configuration
@@ -48,16 +47,6 @@ if (!UNIFI_ENABLED) {
   console.warn('⚠️  UniFi controller not configured. UniFi tools will return errors.');
 }
 
-// =============================================================================
-// OAuth 2.1 Server Setup
-// =============================================================================
-
-const oauthServer = new OAuthServer({
-  authorizationUrl: new URL(`${BASE_URL}/consent`),
-  scopesSupported: ['mcp:tools', 'mcp:read', 'mcp:write'],
-  accessTokenLifetime: 3600, // 1 hour
-  refreshTokenLifetime: 86400 * 7, // 7 days
-});
 
 // =============================================================================
 // UniFi Controller Class
@@ -365,194 +354,21 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Store for pending authorizations and MCP transports
-const pendingAuth = new Map();
+// Store for MCP transports
 const transports = new Map();
 
 // =============================================================================
-// OAuth 2.1 Routes (via mcp-oauth-server)
-// =============================================================================
-
-// Mount OAuth router at root (provides /.well-known/oauth-*, /authorize, /token, etc.)
-app.use(mcpAuthRouter({
-  provider: oauthServer,
-  issuerUrl: new URL(BASE_URL),
-  resourceServerUrl: new URL(`${BASE_URL}/mcp`),
-  scopesSupported: ['mcp:tools', 'mcp:read', 'mcp:write'],
-  clientRegistrationOptions: {
-    clientIdGeneration: true,
-  },
-}));
-
-// =============================================================================
-// Consent Page - Integrates with Cloudflare Access
-// =============================================================================
-
-/**
- * GET /consent - Shows consent page or redirects to Cloudflare Access
- *
- * The OAuth flow redirects here. We check for Cloudflare Access headers.
- * If not authenticated via CF Access, we show a login prompt.
- * If authenticated, we show the consent form.
- */
-app.get('/consent', (req, res) => {
-  // Store OAuth params
-  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope, response_type } = req.query;
-
-  // Check for Cloudflare Access authentication
-  const cfEmail = req.headers['cf-access-authenticated-user-email'];
-
-  // Store the auth request
-  const authId = randomUUID();
-  pendingAuth.set(authId, {
-    client_id,
-    redirect_uri,
-    state,
-    code_challenge,
-    code_challenge_method,
-    scope,
-    response_type,
-    email: cfEmail,
-    created: Date.now(),
-  });
-
-  // Clean up old pending auths (older than 10 minutes)
-  const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
-  for (const [id, auth] of pendingAuth.entries()) {
-    if (auth.created < tenMinutesAgo) pendingAuth.delete(id);
-  }
-
-  if (cfEmail) {
-    // User is authenticated via Cloudflare Access
-    // Check email allowlist if configured
-    if (ALLOWED_EMAILS.length > 0 && !ALLOWED_EMAILS.includes(cfEmail.toLowerCase())) {
-      return res.status(403).send(`
-        <!DOCTYPE html><html><head><title>Access Denied</title>
-        <style>body{font-family:system-ui;max-width:500px;margin:100px auto;text-align:center;}h1{color:#c62828;}</style>
-        </head><body><h1>Access Denied</h1><p>Your email (${cfEmail}) is not authorized.</p></body></html>
-      `);
-    }
-
-    // Show consent page
-    res.send(`
-      <!DOCTYPE html><html><head><title>Authorize - UniFi MCP Server</title>
-      <style>
-        body{font-family:system-ui;max-width:500px;margin:50px auto;padding:20px;}
-        h1{color:#333;border-bottom:2px solid #f48120;padding-bottom:10px;}
-        .box{padding:20px;background:#f5f5f5;border-radius:8px;margin:20px 0;}
-        .email{font-weight:bold;color:#1976d2;}
-        .scopes{margin:15px 0;}
-        .scope{display:inline-block;background:#e3f2fd;padding:4px 12px;border-radius:4px;margin:4px;}
-        .buttons{margin-top:20px;}
-        button{padding:12px 24px;font-size:16px;border:none;border-radius:6px;cursor:pointer;margin-right:10px;}
-        .approve{background:#4caf50;color:white;}
-        .deny{background:#757575;color:white;}
-      </style>
-      </head><body>
-        <h1>Authorize Application</h1>
-        <div class="box">
-          <p>Signed in as: <span class="email">${cfEmail}</span></p>
-          <p><strong>${client_id || 'An application'}</strong> is requesting access to your UniFi MCP Server.</p>
-          <div class="scopes">
-            <p>Requested permissions:</p>
-            ${(scope || 'mcp:tools').split(' ').map(s => `<span class="scope">${s}</span>`).join('')}
-          </div>
-        </div>
-        <form method="POST" action="/consent/approve">
-          <input type="hidden" name="auth_id" value="${authId}">
-          <div class="buttons">
-            <button type="submit" class="approve">Approve</button>
-            <button type="submit" formaction="/consent/deny" class="deny">Deny</button>
-          </div>
-        </form>
-      </body></html>
-    `);
-  } else {
-    // Not authenticated via Cloudflare Access
-    // In production behind CF Tunnel + Access, this shouldn't happen
-    // Show a message about needing Cloudflare Access
-    res.send(`
-      <!DOCTYPE html><html><head><title>Authentication Required - UniFi MCP Server</title>
-      <style>
-        body{font-family:system-ui;max-width:500px;margin:100px auto;padding:20px;text-align:center;}
-        h1{color:#333;}
-        .box{padding:20px;background:#fff3e0;border-radius:8px;margin:20px 0;border-left:4px solid #ff9800;}
-        code{background:#f5f5f5;padding:2px 8px;border-radius:4px;}
-      </style>
-      </head><body>
-        <h1>Authentication Required</h1>
-        <div class="box">
-          <p>This server requires Cloudflare Access authentication.</p>
-          <p>Please access this server through your Cloudflare Access URL.</p>
-        </div>
-        <p><small>Auth ID: ${authId}</small></p>
-        <form method="POST" action="/consent/approve">
-          <input type="hidden" name="auth_id" value="${authId}">
-          <p style="color:#666;margin-top:30px;">Development mode: <button type="submit">Continue without auth</button></p>
-        </form>
-      </body></html>
-    `);
-  }
-});
-
-/**
- * POST /consent/approve - User approved the authorization
- */
-app.post('/consent/approve', authenticateHandler({
-  provider: oauthServer,
-  getUser: (req) => {
-    const authId = req.body.auth_id;
-    const auth = pendingAuth.get(authId);
-    if (!auth) return null;
-
-    // Use email from Cloudflare Access or fallback
-    const email = auth.email || 'dev@localhost';
-    pendingAuth.delete(authId);
-
-    console.log(`[OAuth] Approved authorization for: ${email}`);
-    return email;
-  },
-}));
-
-/**
- * POST /consent/deny - User denied the authorization
- */
-app.post('/consent/deny', (req, res) => {
-  const authId = req.body.auth_id;
-  const auth = pendingAuth.get(authId);
-
-  if (auth && auth.redirect_uri) {
-    pendingAuth.delete(authId);
-    const redirectUrl = new URL(auth.redirect_uri);
-    redirectUrl.searchParams.set('error', 'access_denied');
-    redirectUrl.searchParams.set('error_description', 'User denied the authorization request');
-    if (auth.state) redirectUrl.searchParams.set('state', auth.state);
-    return res.redirect(redirectUrl.toString());
-  }
-
-  res.status(400).send('Invalid request');
-});
-
-// =============================================================================
-// Health & Dashboard Routes
+// Health Endpoint
 // =============================================================================
 
 app.get('/health', (req, res) => {
-  // SECURITY: Explicitly coerce to booleans to prevent accidental secret leakage
-  const response = {
+  const cfEmail = req.headers['cf-access-authenticated-user-email'];
+  res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     unifiEnabled: UNIFI_ENABLED === true,
-    oauthEnabled: true,
-  };
-  // Runtime assertion: fail if any value is a string (potential secret leak)
-  for (const [key, value] of Object.entries(response)) {
-    if (typeof value === 'string' && key !== 'status' && key !== 'timestamp') {
-      console.error(`SECURITY: Health endpoint would leak string value for '${key}'`);
-      return res.status(500).json({ status: 'error', message: 'Internal configuration error' });
-    }
-  }
-  res.json(response);
+    cfAuthenticated: Boolean(cfEmail),
+  });
 });
 
 app.get('/', (req, res) => {
@@ -617,68 +433,63 @@ app.get('/', (req, res) => {
 });
 
 // =============================================================================
-// MCP Endpoint (Protected by OAuth)
+// MCP Endpoint (Protected by Cloudflare Access at edge)
 // =============================================================================
 
-app.all('/mcp',
-  requireBearerAuth({
-    verifier: oauthServer,
-    requiredScopes: ['mcp:tools'],
-  }),
-  async (req, res) => {
-    const userId = req.auth?.userId || 'anonymous';
-    console.log(`[MCP] ${req.method} request from ${userId}`);
+app.all('/mcp', async (req, res) => {
+  // Cloudflare Access handles auth - we just log the user
+  const cfEmail = req.headers['cf-access-authenticated-user-email'] || 'anonymous';
+  console.log(`[MCP] ${req.method} request from ${cfEmail}`);
 
-    const mcpSessionId = req.headers['mcp-session-id'];
+  const mcpSessionId = req.headers['mcp-session-id'];
 
-    if (req.method === 'GET') {
-      if (!mcpSessionId || !transports.has(mcpSessionId)) {
-        return res.status(400).json({ error: 'Session not found' });
-      }
-      await transports.get(mcpSessionId).handleRequest(req, res);
-      return;
+  if (req.method === 'GET') {
+    if (!mcpSessionId || !transports.has(mcpSessionId)) {
+      return res.status(400).json({ error: 'Session not found' });
     }
+    await transports.get(mcpSessionId).handleRequest(req, res);
+    return;
+  }
 
-    if (req.method === 'POST') {
-      const body = req.body;
+  if (req.method === 'POST') {
+    const body = req.body;
 
-      if (body?.method === 'initialize') {
-        const newSessionId = randomUUID();
-        console.log(`[MCP] New session: ${newSessionId} for user: ${userId}`);
+    if (body?.method === 'initialize') {
+      const newSessionId = randomUUID();
+      console.log(`[MCP] New session: ${newSessionId} for user: ${cfEmail}`);
 
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => newSessionId,
-        });
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => newSessionId,
+      });
 
-        const mcpServer = createMcpServer();
-        await mcpServer.connect(transport);
+      const mcpServer = createMcpServer();
+      await mcpServer.connect(transport);
 
-        transports.set(newSessionId, transport);
-        transport.onclose = () => {
-          console.log(`[MCP] Session closed: ${newSessionId}`);
-          transports.delete(newSessionId);
-        };
-
-        await transport.handleRequest(req, res, body);
-        return;
-      }
-
-      if (!mcpSessionId) {
-        return res.status(400).json({ error: 'Missing mcp-session-id header' });
-      }
-
-      const transport = transports.get(mcpSessionId);
-      if (!transport) {
-        return res.status(404).json({ error: 'Session not found' });
-      }
+      transports.set(newSessionId, transport);
+      transport.onclose = () => {
+        console.log(`[MCP] Session closed: ${newSessionId}`);
+        transports.delete(newSessionId);
+      };
 
       await transport.handleRequest(req, res, body);
       return;
     }
 
-    res.status(405).json({ error: 'Method not allowed' });
+    if (!mcpSessionId) {
+      return res.status(400).json({ error: 'Missing mcp-session-id header' });
+    }
+
+    const transport = transports.get(mcpSessionId);
+    if (!transport) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    await transport.handleRequest(req, res, body);
+    return;
   }
-);
+
+  res.status(405).json({ error: 'Method not allowed' });
+});
 
 // =============================================================================
 // Error Handler
@@ -696,18 +507,11 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`  Port:       ${PORT}`);
   console.log(`  Base URL:   ${BASE_URL}`);
-  console.log(`  UniFi:      ${UNIFI_ENABLED ? UNIFI_HOST : 'NOT CONFIGURED'}`);
-  console.log(`  OAuth:      Enabled (mcp-oauth-server)`);
-  if (CF_ACCESS_TEAM) {
-    console.log(`  CF Access:  ${CF_ACCESS_TEAM}.cloudflareaccess.com`);
-  }
-  if (ALLOWED_EMAILS.length > 0) {
-    console.log(`  Allowed:    ${ALLOWED_EMAILS.join(', ')}`);
-  }
+  console.log(`  UniFi:      ${UNIFI_ENABLED ? 'Configured' : 'NOT CONFIGURED'}`);
+  console.log(`  Auth:       Cloudflare Access (external)`);
   console.log('');
-  console.log(`  Dashboard:  ${BASE_URL}/`);
-  console.log(`  MCP URL:    ${BASE_URL}/mcp`);
-  console.log(`  OAuth Meta: ${BASE_URL}/.well-known/oauth-authorization-server`);
+  console.log(`  Health:     ${BASE_URL}/health`);
+  console.log(`  MCP:        ${BASE_URL}/mcp`);
   console.log('='.repeat(50));
   console.log('');
 });

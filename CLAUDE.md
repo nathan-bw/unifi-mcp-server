@@ -1,170 +1,122 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with this repository.
 
 ## Project Overview
 
-This is an MCP (Model Context Protocol) server that provides tools for managing UniFi networks. It implements OAuth 2.1 for authentication (using `mcp-oauth-server`) and integrates with Cloudflare Access as the identity provider.
+A self-hosted MCP server for managing UniFi networks. Runs behind Cloudflare Tunnel + Access.
+
+**Architecture (3 Layers):**
+
+| Layer | Responsibility | Who |
+|-------|----------------|-----|
+| 1. UniFi API | Local HTTPS connection to UDM SE | This app |
+| 2. MCP Server | Streamable HTTP on `/mcp` | This app |
+| 3. Auth/Security | OAuth, SSO, Zero Trust | Cloudflare |
 
 ## Commands
 
 ```bash
-# Development with hot-reload
+# Development
 npm run dev
 
 # Production
 npm start
 
 # Docker
-docker compose up -d        # Start
-docker compose logs -f      # View logs
-docker compose down         # Stop
-docker build -t unifi-mcp-server .  # Build image
-
-# Test OAuth metadata
-curl http://localhost:3000/.well-known/oauth-authorization-server
+docker compose up -d
+docker compose logs -f
+docker compose down
+docker compose build --no-cache
 ```
 
-## Architecture
+## Verification Commands
 
-### Single-file Server (`server.js`)
+```bash
+# Health check (local)
+curl http://localhost:3000/health
 
-The entire server is in one file with clearly marked sections:
+# Health check (public)
+curl https://unifi-mcp.thesacketts.org/health
 
-1. **Configuration** - Environment variables loaded via dotenv
-2. **OAuth 2.1 Server Setup** - `OAuthServer` from `mcp-oauth-server`
-3. **UniFiController class** - Wrapper around `node-unifi` library with lazy connection
-4. **MCP Server setup** - `createMcpServer()` registers all tools using `@modelcontextprotocol/sdk`
-5. **OAuth Routes** - Mounted via `mcpAuthRouter()` middleware
-6. **Consent Page** - Custom `/consent` endpoint that uses Cloudflare Access identity
-7. **Express routes** - Dashboard, health check
-8. **MCP endpoint** - `/mcp` protected by `requireBearerAuth()` middleware
-
-### Authentication Flow (Two Layers)
-
-```
-Layer 1 - Cloudflare Access (Edge):
-Request → Cloudflare Access → CF Tunnel → Server
-          (adds Cf-Access-Authenticated-User-Email header)
-
-Layer 2 - OAuth 2.1 (MCP Protocol):
-MCP Client → /.well-known/oauth-authorization-server (discover)
-          → /register (register client)
-          → /authorize (start flow with PKCE)
-          → /consent (user approves, uses CF Access identity)
-          → /token (exchange code for tokens)
-          → /mcp (access with Bearer token)
+# MCP endpoint (should work when authenticated via CF Access)
+curl -X POST https://unifi-mcp.thesacketts.org/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"initialize","id":1}'
 ```
 
-### OAuth 2.1 Endpoints
+## MCP Tools Exposed
 
-| Endpoint | Purpose |
-|----------|---------|
-| `/.well-known/oauth-authorization-server` | Server metadata (discovery) |
-| `/.well-known/oauth-protected-resource/mcp` | Resource metadata |
-| `/authorize` | Authorization endpoint |
-| `/token` | Token endpoint |
-| `/register` | Dynamic client registration |
-| `/consent` | Custom consent page (uses CF Access) |
+| Tool | Description |
+|------|-------------|
+| `list_clients` | List all connected clients |
+| `get_client` | Get details for a specific client |
+| `search_devices` | Search devices by name/MAC |
+| `list_access_points` | List all access points |
+| `get_network_health` | Get network health status |
+| `block_client` | Block a client by MAC |
+| `unblock_client` | Unblock a client |
+| `reconnect_client` | Force client reconnection |
+| `restart_device` | Restart a UniFi device |
+| `list_blocked_clients` | List all blocked clients |
+| `echo` | Test tool |
 
-### Key Patterns
+## File Structure
 
-- **Lazy UniFi connection**: `UniFiController.ensureConnected()` connects on first API call
-- **Session-based MCP**: Each MCP client gets a unique session ID; transports stored in `Map`
-- **Pending auth storage**: Authorization requests stored in `pendingAuth` Map with 10-minute TTL
-- **Bearer token validation**: `requireBearerAuth()` middleware validates tokens on `/mcp`
-- **Graceful degradation**: Server runs in dev mode without CF Access, UniFi returns errors when not configured
+```
+server.js          # Single-file server (all logic)
+.env               # Environment config (secrets)
+docker-compose.yml # Docker deployment
+Dockerfile         # Container build
+```
 
-### MCP Tools
+## Key Sections in server.js
 
-Tools are registered in `createMcpServer()` using `server.registerTool()`. Each tool:
-- Has a Zod schema for input validation (when inputs needed)
-- Returns `{ content: [{ type: 'text', text: '...' }] }` format
-- Catches errors and returns `{ isError: true }` on failure
+1. **Configuration** - Environment variables
+2. **UniFiController class** - Wrapper around `node-unifi`
+3. **createMcpServer()** - Registers all MCP tools
+4. **Express routes** - `/health`, `/`, `/mcp`
+5. **MCP endpoint** - Streamable HTTP transport
 
 ## Environment Variables
 
-Required for full functionality (see `.env.example`):
-- `PORT` - Server port (default: 3000)
-- `BASE_URL` - Public URL for OAuth redirects (required in production)
-- `UNIFI_HOST`, `UNIFI_USERNAME`, `UNIFI_PASSWORD` - UniFi controller
-- `CF_ACCESS_TEAM` - Cloudflare Access team name (optional)
-- `ALLOWED_EMAILS` - Optional email allowlist
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `PORT` | No | Server port (default: 3000) |
+| `BASE_URL` | Yes | Public URL (e.g., https://unifi-mcp.thesacketts.org) |
+| `UNIFI_HOST` | Yes | UDM SE IP address |
+| `UNIFI_USERNAME` | Yes | UniFi local admin username |
+| `UNIFI_PASSWORD` | Yes | UniFi local admin password |
+| `UNIFI_SITE` | No | Site name (default: default) |
+| `CF_ACCESS_TEAM` | No | Cloudflare team name (for JWT validation) |
+| `CF_ACCESS_AUD` | No | Cloudflare AUD tag (for JWT validation) |
 
-## Dependencies
+## Current Status (2026-02-03)
 
-- `@modelcontextprotocol/sdk` - MCP protocol implementation (Streamable HTTP transport)
-- `mcp-oauth-server` - OAuth 2.1 Authorization Server for MCP
-- `node-unifi` - UniFi controller API client
-- `express` - Web server
-- `zod` - Tool input schema validation
+- ✅ OAuth removed - Cloudflare Access handles all auth
+- ✅ `/health` returns safe booleans only
+- ✅ `/mcp` endpoint uses Streamable HTTP
+- ✅ UniFi API client functional
+- ✅ 11 MCP tools registered
 
-## Current Status (2026-02-02)
+## Cloudflare Setup Required
 
-### Security Fixes Applied
+1. **Cloudflare Tunnel** - Expose localhost:3000
+2. **Cloudflare Access Application** - Protect the hostname
+3. **Access Policy** - Define who can access
+4. **MCP Portal** (optional) - Register as MCP server
 
-1. **Password leak fixed** - `UNIFI_ENABLED` now uses `Boolean()` to ensure only booleans are returned
-2. **Health endpoint hardened** - Runtime assertion prevents any string values (except status/timestamp) from being returned
+## Next Steps
 
-### OAuth 2.1 Endpoints (MCP Spec Compliant)
+- [ ] Deploy updated code to Raspberry Pi
+- [ ] Verify `/health` works through CF Tunnel
+- [ ] Test `/mcp` endpoint with MCP client
+- [ ] Register with Cloudflare MCP Portal
 
-Per [MCP Authorization Spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization):
+## Resuming Work
 
-| Endpoint | Purpose | Status |
-|----------|---------|--------|
-| `/.well-known/oauth-authorization-server` | AS metadata (RFC 8414) | ✅ Exposed at root |
-| `/.well-known/oauth-protected-resource/mcp` | Resource metadata (RFC 9728) | ✅ Exposed |
-| `/authorize` | Authorization endpoint | ✅ Root path |
-| `/token` | Token endpoint | ✅ Root path |
-| `/register` | Dynamic client registration | ✅ Root path |
-| `/consent` | Custom consent (uses CF Access identity) | ✅ Custom |
-
-### Verification Commands
-
-```bash
-# Rebuild and restart Docker container (REQUIRED after code changes)
-docker compose down && docker compose build --no-cache && docker compose up -d
-
-# Wait for startup
-sleep 3
-
-# 1. Health check - must return booleans only, NO secrets
-curl -s http://localhost:3000/health | jq .
-# Expected: {"status":"ok","timestamp":"...","unifiEnabled":true,"oauthEnabled":true}
-
-# 2. OAuth discovery - must return metadata JSON
-curl -s http://localhost:3000/.well-known/oauth-authorization-server | jq .
-# Expected: JSON with issuer, authorization_endpoint, token_endpoint, etc.
-
-# 3. Protected resource metadata
-curl -s http://localhost:3000/.well-known/oauth-protected-resource/mcp | jq .
-
-# 4. Check logs for errors
-docker compose logs --tail=50
-```
-
-### Cloudflare Access for SaaS Integration
-
-This server implements the **Third-Party Authorization Flow** from the MCP spec:
-
-1. MCP client discovers OAuth endpoints via `/.well-known/oauth-authorization-server`
-2. Client registers via `/register` (Dynamic Client Registration)
-3. Client initiates OAuth with PKCE at `/authorize`
-4. Server redirects to `/consent` which checks `Cf-Access-Authenticated-User-Email` header
-5. If user passes Cloudflare Access policy, consent is granted
-6. Client exchanges code for token at `/token`
-7. Client accesses `/mcp` with `Authorization: Bearer <token>`
-
-**Required Cloudflare Setup:**
-- Cloudflare Tunnel exposing this server
-- Access Application protecting the tunnel
-- Identity provider configured in Cloudflare Access
-
-### Next Steps Checklist
-
-- [ ] Rebuild Docker image: `docker compose build --no-cache`
-- [ ] Restart container: `docker compose up -d`
-- [ ] Verify `/health` returns booleans only
-- [ ] Verify `/.well-known/oauth-authorization-server` returns JSON
-- [ ] Test full OAuth flow via MCP client
-- [ ] Verify Cloudflare Access headers are received at `/consent`
+If starting a new session:
+1. The OAuth layer has been REMOVED - do not add it back
+2. Auth is handled by Cloudflare Access at the edge
+3. This server just exposes `/health` and `/mcp`
+4. Never log or expose secrets
