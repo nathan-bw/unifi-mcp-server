@@ -217,6 +217,71 @@ curl -s https://unifi-mcp.thesacketts.org/health
 
 ### Next Steps
 
-- [ ] Deploy: `git pull && docker compose build --no-cache && docker compose up -d`
-- [ ] Test all new endpoints
+- [x] Deploy: `git pull && docker compose build --no-cache && docker compose up -d`
+- [x] Test all new endpoints
+- [ ] Register with Cloudflare MCP Portal
+
+---
+
+## Update 2026-02-03 (Session 4) - Cloudflare Access + Entra ID Integration
+
+### Current Status
+
+**MCP 2025-11-25 compliance is COMPLETE and verified:**
+
+```bash
+# All three endpoints confirmed working:
+curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-protected-resource/mcp
+# Returns: {"resource":"https://unifi-mcp.thesacketts.org/mcp","authorization_servers":["https://unifi-mcp.thesacketts.org"],...}
+
+curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-authorization-server
+# Returns: {"issuer":"https://unifi-mcp.thesacketts.org","authorization_endpoint":...}
+
+curl -s -I -X POST https://unifi-mcp.thesacketts.org/mcp -H "Accept: application/json"
+# Returns: HTTP/2 401 with www-authenticate: Bearer resource_metadata="..."
+```
+
+### Current Blocker
+
+**Error:** "Authentication Error - Failed to fetch user/group information from the identity provider"
+
+This error occurs when:
+1. User clicks "Connect" in Claude Desktop
+2. Browser opens Cloudflare Access login page
+3. User selects Entra ID and authenticates successfully
+4. **ERROR** - Cloudflare Access cannot retrieve user info from Entra ID
+
+### Root Cause
+
+Cloudflare Access for SaaS needs proper API permissions in Azure AD to fetch user claims.
+
+### Fix Required (Azure Portal)
+
+1. **Azure AD → App Registrations → [Your Cloudflare App]**
+
+2. **API Permissions** → Add:
+   - `Microsoft Graph` → `User.Read` (Delegated)
+   - `openid` (Delegated)
+   - `profile` (Delegated)
+   - `email` (Delegated)
+
+3. **Click "Grant admin consent"** for your organization
+
+4. **Token configuration** → Add optional claims to ID token:
+   - `email`
+   - `preferred_username`
+
+### Fix Required (Cloudflare Zero Trust)
+
+1. **Settings → Authentication → Login methods**
+2. Find Entra ID provider → Click **Test**
+3. If test fails, the Azure AD permissions are missing
+
+### Resume Checklist
+
+- [ ] Fix Entra ID API permissions (User.Read, openid, profile, email)
+- [ ] Grant admin consent in Azure
+- [ ] Add optional claims (email, preferred_username) to ID token
+- [ ] Test Entra ID provider in Cloudflare Zero Trust settings
+- [ ] Retry Claude Desktop connection
 - [ ] Register with Cloudflare MCP Portal
