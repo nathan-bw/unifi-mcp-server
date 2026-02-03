@@ -371,7 +371,33 @@ const accessTokens = new Map(); // token -> { client_id, user, expires }
 const pendingAuth = new Map(); // state -> { client_id, redirect_uri, code_challenge, code_challenge_method }
 
 // =============================================================================
-// OAuth 2.1 Discovery Endpoint
+// OAuth 2.0 Protected Resource Metadata (RFC 9728) - REQUIRED by MCP 2025-11-25
+// =============================================================================
+
+const RESOURCE_METADATA_URL = `${BASE_URL}/.well-known/oauth-protected-resource/mcp`;
+const MCP_RESOURCE_URI = `${BASE_URL}/mcp`;
+
+app.get('/.well-known/oauth-protected-resource/mcp', (req, res) => {
+  res.json({
+    resource: MCP_RESOURCE_URI,
+    authorization_servers: [BASE_URL],
+    scopes_supported: ['mcp:tools'],
+    bearer_methods_supported: ['header'],
+  });
+});
+
+// Also serve at root for compatibility
+app.get('/.well-known/oauth-protected-resource', (req, res) => {
+  res.json({
+    resource: MCP_RESOURCE_URI,
+    authorization_servers: [BASE_URL],
+    scopes_supported: ['mcp:tools'],
+    bearer_methods_supported: ['header'],
+  });
+});
+
+// =============================================================================
+// OAuth 2.1 Authorization Server Metadata (RFC 8414)
 // =============================================================================
 
 app.get('/.well-known/oauth-authorization-server', (req, res) => {
@@ -595,7 +621,11 @@ app.post('/token', (req, res) => {
 function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization;
 
+  // WWW-Authenticate header per RFC 9728 and MCP 2025-11-25 spec
+  const wwwAuth = `Bearer resource_metadata="${RESOURCE_METADATA_URL}", scope="mcp:tools"`;
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.set('WWW-Authenticate', wwwAuth);
     return res.status(401).json({ error: 'invalid_token', error_description: 'Missing Authorization header' });
   }
 
@@ -604,6 +634,7 @@ function requireAuth(req, res, next) {
 
   if (!tokenData || tokenData.expires < Date.now()) {
     accessTokens.delete(token);
+    res.set('WWW-Authenticate', wwwAuth);
     return res.status(401).json({ error: 'invalid_token', error_description: 'Invalid or expired token' });
   }
 
@@ -686,16 +717,70 @@ app.get('/', (req, res) => {
 });
 
 // =============================================================================
-// MCP Endpoint (Protected by OAuth 2.1)
+// MCP Endpoint (Protected by OAuth 2.1) - MCP 2025-11-25 Compliant
 // =============================================================================
 
-app.all('/mcp', requireAuth, async (req, res) => {
+// Origin validation middleware (required by MCP 2025-11-25 for DNS rebinding protection)
+function validateOrigin(req, res, next) {
+  const origin = req.headers.origin;
+
+  // Allow requests without Origin (non-browser clients)
+  if (!origin) {
+    return next();
+  }
+
+  // Allow localhost for development
+  try {
+    const originUrl = new URL(origin);
+    if (originUrl.hostname === 'localhost' || originUrl.hostname === '127.0.0.1') {
+      return next();
+    }
+
+    // Allow requests from same origin
+    const baseUrl = new URL(BASE_URL);
+    if (originUrl.hostname === baseUrl.hostname) {
+      return next();
+    }
+  } catch (e) {
+    // Invalid origin URL
+  }
+
+  // Reject other origins
+  console.warn(`[MCP] Rejected request from origin: ${origin}`);
+  return res.status(403).json({ error: 'forbidden', error_description: 'Invalid origin' });
+}
+
+app.all('/mcp', validateOrigin, requireAuth, async (req, res) => {
   const user = req.user || 'anonymous';
   console.log(`[MCP] ${req.method} request from ${user}`);
 
   const mcpSessionId = req.headers['mcp-session-id'];
+  const protocolVersion = req.headers['mcp-protocol-version'];
 
+  // DELETE - Session termination (MCP 2025-11-25)
+  if (req.method === 'DELETE') {
+    if (!mcpSessionId) {
+      return res.status(400).json({ error: 'Missing mcp-session-id header' });
+    }
+
+    const transport = transports.get(mcpSessionId);
+    if (transport) {
+      console.log(`[MCP] Session terminated by client: ${mcpSessionId}`);
+      transports.delete(mcpSessionId);
+      return res.status(200).json({ success: true });
+    }
+
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  // GET - SSE stream for server-to-client messages
   if (req.method === 'GET') {
+    // Validate Accept header
+    const accept = req.headers.accept || '';
+    if (!accept.includes('text/event-stream')) {
+      return res.status(406).json({ error: 'Not Acceptable', error_description: 'Accept header must include text/event-stream' });
+    }
+
     if (!mcpSessionId || !transports.has(mcpSessionId)) {
       return res.status(400).json({ error: 'Session not found' });
     }
@@ -703,12 +788,19 @@ app.all('/mcp', requireAuth, async (req, res) => {
     return;
   }
 
+  // POST - JSON-RPC messages
   if (req.method === 'POST') {
+    // Validate Accept header
+    const accept = req.headers.accept || '';
+    if (!accept.includes('application/json') && !accept.includes('text/event-stream')) {
+      return res.status(406).json({ error: 'Not Acceptable', error_description: 'Accept header must include application/json or text/event-stream' });
+    }
+
     const body = req.body;
 
     if (body?.method === 'initialize') {
       const newSessionId = randomUUID();
-      console.log(`[MCP] New session: ${newSessionId} for user: ${user}`);
+      console.log(`[MCP] New session: ${newSessionId} for user: ${user}, protocol: ${protocolVersion || 'unknown'}`);
 
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => newSessionId,

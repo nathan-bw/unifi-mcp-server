@@ -155,3 +155,68 @@ curl -s -I https://unifi-mcp.thesacketts.org/
 - [ ] Deploy updated code: `git pull && docker compose build --no-cache && docker compose up -d`
 - [ ] Verify OAuth discovery returns JSON
 - [ ] Test MCP Portal connection
+
+---
+
+## Update 2026-02-03 (Session 3) - MCP 2025-11-25 Compliance
+
+### Changes Made
+
+**RFC 9728 Protected Resource Metadata:**
+- Added `/.well-known/oauth-protected-resource/mcp` endpoint
+- Added `/.well-known/oauth-protected-resource` (root fallback)
+- Returns `resource`, `authorization_servers`, `scopes_supported`
+
+**WWW-Authenticate Header (401 responses):**
+- Now includes `resource_metadata` URL per spec
+- Includes `scope="mcp:tools"` guidance
+
+**Origin Validation (DNS rebinding protection):**
+- Validates Origin header on all /mcp requests
+- Allows localhost, 127.0.0.1, and same-origin
+- Returns 403 Forbidden for invalid origins
+
+**DELETE Method (session termination):**
+- Clients can explicitly terminate sessions via DELETE /mcp
+
+**Accept Header Validation:**
+- GET requires `text/event-stream`
+- POST requires `application/json` or `text/event-stream`
+
+**MCP-Protocol-Version Header:**
+- Logged during session initialization
+
+### Verification Commands
+
+```bash
+# Protected Resource Metadata (RFC 9728)
+curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-protected-resource/mcp
+
+# Authorization Server Metadata
+curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-authorization-server
+
+# 401 with WWW-Authenticate header
+curl -s -I https://unifi-mcp.thesacketts.org/mcp
+
+# Health
+curl -s https://unifi-mcp.thesacketts.org/health
+```
+
+### MCP 2025-11-25 Compliance Status
+
+| Requirement | Status |
+|-------------|--------|
+| Streamable HTTP POST/GET/DELETE | ✅ |
+| `/.well-known/oauth-protected-resource` (RFC 9728) | ✅ |
+| `WWW-Authenticate` with `resource_metadata` | ✅ |
+| Origin header validation | ✅ |
+| Accept header validation | ✅ |
+| MCP-Protocol-Version handling | ✅ |
+| PKCE S256 | ✅ |
+| Dynamic Client Registration | ✅ |
+
+### Next Steps
+
+- [ ] Deploy: `git pull && docker compose build --no-cache && docker compose up -d`
+- [ ] Test all new endpoints
+- [ ] Register with Cloudflare MCP Portal
