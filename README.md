@@ -69,18 +69,18 @@ This server implements a **two-layer authentication** approach:
 |----------|-------------|
 | `/.well-known/oauth-authorization-server` | Authorization server metadata |
 | `/.well-known/oauth-protected-resource` | Protected resource metadata |
-| `/oauth/authorize` | Authorization endpoint |
-| `/oauth/token` | Token endpoint |
-| `/oauth/register` | Dynamic client registration |
+| `/authorize` | Authorization endpoint |
+| `/token` | Token endpoint |
+| `/register` | Dynamic client registration |
 | `/consent` | User consent page (uses CF Access identity) |
 
 ### How It Works
 
 1. MCP client discovers OAuth endpoints via `/.well-known/oauth-authorization-server`
-2. Client registers dynamically via `/oauth/register`
-3. Client initiates OAuth flow to `/oauth/authorize` with PKCE
+2. Client registers dynamically via `/register`
+3. Client initiates OAuth flow to `/authorize` with PKCE
 4. User is redirected to `/consent` where Cloudflare Access identity is used
-5. Upon approval, client exchanges code for tokens at `/oauth/token`
+5. Upon approval, client exchanges code for tokens at `/token`
 6. Client accesses `/mcp` with Bearer token
 
 ## Configuration
