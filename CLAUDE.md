@@ -108,3 +108,50 @@ curl -X POST https://unifi-mcp.thesacketts.org/mcp
 2. Cloudflare Access for SaaS is the identity provider
 3. MCP clients register → authorize → get token → access /mcp
 4. Never expose secrets in logs or responses
+
+---
+
+## Update 2026-02-03 (Session 2)
+
+### Changes Made
+- Removed dev mode auth bypass (was auto-approving without Cloudflare)
+- OAuth now requires `OAUTH_ENABLED=true` (CF credentials configured)
+
+### Cloudflare Access Configuration (Multiple Apps)
+
+Per [Application Paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/), create separate Access Applications:
+
+| Access App | Domain/Path | Policy | Purpose |
+|------------|-------------|--------|---------|
+| `UniFi MCP - OAuth Discovery` | `unifi-mcp.thesacketts.org/.well-known/*` | Bypass | MCP client discovery |
+| `UniFi MCP - Register` | `unifi-mcp.thesacketts.org/register` | Bypass | Client registration |
+| `UniFi MCP - Authorize` | `unifi-mcp.thesacketts.org/authorize` | Bypass | Start OAuth |
+| `UniFi MCP - Callback` | `unifi-mcp.thesacketts.org/callback` | Bypass | CF redirect target |
+| `UniFi MCP - Token` | `unifi-mcp.thesacketts.org/token` | Bypass | Token exchange |
+| `UniFi MCP - Health` | `unifi-mcp.thesacketts.org/health` | Bypass | Health check |
+| `UniFi MCP - Root` | `unifi-mcp.thesacketts.org` | Allow (your users) | Protect dashboard |
+
+**Note:** More specific paths override broader ones. `/mcp` is protected by Bearer tokens (app-level), not CF Access edge policy.
+
+### Verification Commands
+
+```bash
+# 1. OAuth discovery (should return JSON)
+curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-authorization-server
+
+# 2. Health (should return JSON)
+curl -s https://unifi-mcp.thesacketts.org/health
+
+# 3. MCP without token (should return 401)
+curl -s https://unifi-mcp.thesacketts.org/mcp
+
+# 4. Root (should redirect to CF login if protected)
+curl -s -I https://unifi-mcp.thesacketts.org/
+```
+
+### Next Steps
+
+- [ ] Create Access Applications per table above
+- [ ] Deploy updated code: `git pull && docker compose build --no-cache && docker compose up -d`
+- [ ] Verify OAuth discovery returns JSON
+- [ ] Test MCP Portal connection

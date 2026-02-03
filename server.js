@@ -443,19 +443,7 @@ app.get('/authorize', (req, res) => {
   }
 
   if (!OAUTH_ENABLED) {
-    // Dev mode: auto-approve
-    const code = randomUUID();
-    authCodes.set(code, {
-      client_id,
-      user: 'dev@localhost',
-      redirect_uri,
-      code_challenge,
-      expires: Date.now() + 10 * 60 * 1000,
-    });
-    const redirectUrl = new URL(redirect_uri);
-    redirectUrl.searchParams.set('code', code);
-    if (state) redirectUrl.searchParams.set('state', state);
-    return res.redirect(redirectUrl.toString());
+    return res.status(503).json({ error: 'server_error', error_description: 'OAuth not configured' });
   }
 
   // Store pending auth and redirect to Cloudflare
