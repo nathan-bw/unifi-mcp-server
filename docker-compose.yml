@@ -19,10 +19,10 @@ services:
       - NODE_ENV=production
       - PORT=${PORT:-3000}
       - BASE_URL=${BASE_URL:-http://localhost:3000}
-      # Cloudflare Access (optional)
+      # Cloudflare Access for SaaS (OAuth)
       - CF_ACCESS_TEAM=${CF_ACCESS_TEAM}
-      - CF_ACCESS_AUD=${CF_ACCESS_AUD}
-      - ALLOWED_EMAILS=${ALLOWED_EMAILS}
+      - CF_CLIENT_ID=${CF_CLIENT_ID}
+      - CF_CLIENT_SECRET=${CF_CLIENT_SECRET}
       # UniFi Controller
       - UNIFI_HOST=${UNIFI_HOST}
       - UNIFI_PORT=${UNIFI_PORT:-443}
