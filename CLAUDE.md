@@ -1,27 +1,38 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code when working with this repository.
+
 ## Project Overview
 
-UniFi MCP Server with OAuth 2.1 authentication via Cloudflare Access for SaaS.
+UniFi MCP Server - A Model Context Protocol server for managing UniFi networks with OAuth 2.1 authentication via Cloudflare Access for SaaS.
 
-**Architecture:**
+## Architecture
 
-| Layer | Responsibility | Who |
-|-------|----------------|-----|
-| 1. UniFi API | Local HTTPS to UDM SE | This app |
-| 2. MCP Server | Streamable HTTP on `/mcp` | This app |
-| 3. OAuth 2.1 | Token issuance, PKCE validation | This app |
-| 4. Identity (IdP) | User login, SSO | Cloudflare Access for SaaS |
+| Layer | Responsibility | Implementation |
+|-------|----------------|----------------|
+| 1. UniFi API | HTTPS to UDM/Controller | X-API-KEY header, dual API (v1 + classic) |
+| 2. MCP Server | Streamable HTTP on `/mcp` | MCP 2025-11-25 compliant |
+| 3. OAuth 2.1 | Token issuance, PKCE | Custom implementation with auto-registration |
+| 4. Identity (IdP) | User login, SSO | Cloudflare Access for SaaS + Entra ID |
+| 5. Edge Security | Tunnel, WAF | Cloudflare Tunnel |
 
-## OAuth Flow
+## Commands
 
-```
-MCP Client → /register (get client_id)
-          → /authorize (with PKCE)
-          → Cloudflare Access login
-          → /callback (receive CF token)
-          → /token (exchange for MCP token)
-          → /mcp (with Bearer token)
+```bash
+# Development
+npm run dev
+
+# Production (Docker on Raspberry Pi)
+ssh pi@10.230.0.6
+cd ~/unifi-mcp-server
+git pull
+docker compose build --no-cache && docker compose up -d
+docker compose logs -f
+
+# Test endpoints
+curl https://unifi-mcp.thesacketts.org/health
+curl https://unifi-mcp.thesacketts.org/.well-known/oauth-authorization-server
+curl -X POST https://unifi-mcp.thesacketts.org/mcp -H "Accept: application/json"
 ```
 
 ## Required Environment Variables
@@ -29,13 +40,78 @@ MCP Client → /register (get client_id)
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PORT` | No | Server port (default: 3000) |
-| `BASE_URL` | Yes | Public URL |
+| `BASE_URL` | Yes | Public URL (e.g., `https://unifi-mcp.thesacketts.org`) |
 | `CF_ACCESS_TEAM` | Yes | Cloudflare team name (e.g., `breezywillow`) |
 | `CF_CLIENT_ID` | Yes | From Access for SaaS app |
 | `CF_CLIENT_SECRET` | Yes | From Access for SaaS app |
-| `UNIFI_HOST` | Yes | UDM SE IP |
-| `UNIFI_USERNAME` | Yes | UniFi admin |
-| `UNIFI_PASSWORD` | Yes | UniFi password |
+| `UNIFI_HOST` | Yes | UDM IP address |
+| `UNIFI_PORT` | No | UDM port (default: 443) |
+| `UNIFI_API_KEY` | Yes | API key from UDM (Settings → Control Plane → Integrations) |
+| `UNIFI_SITE` | No | Site name (default: `default`) |
+
+## OAuth Flow
+
+```
+MCP Client (Claude Desktop)
+    ↓
+/.well-known/oauth-authorization-server (discover endpoints)
+    ↓
+/authorize?client_id=xxx (auto-registers if unknown, requires PKCE)
+    ↓
+Cloudflare Access for SaaS → Entra ID login
+    ↓
+/callback (exchange CF token for user info)
+    ↓
+/token (exchange auth code for Bearer token)
+    ↓
+/mcp (access with Bearer token)
+```
+
+**Note:** MCP clients like Claude Desktop generate their own `client_id` and don't call `/register`. The server auto-registers unknown clients with localhost redirect URIs.
+
+## MCP Tools (18 total)
+
+### Client Management
+- `list_clients` - List all connected clients
+- `get_client` - Get client by MAC address
+- `search_devices` - Search by hostname, IP, or MAC
+- `block_client` / `unblock_client` - Block/unblock a client
+- `reconnect_client` - Force client to reconnect
+- `list_blocked_clients` - List blocked clients
+
+### Device Management
+- `list_devices` - List ALL UniFi devices (APs, switches, gateways)
+- `list_access_points` - List access points only
+- `restart_device` - Restart a device by MAC
+
+### Network Configuration
+- `list_networks` - List VLANs and subnets
+- `list_wlans` - List wireless SSIDs
+- `list_port_forwards` - List port forwarding rules
+
+### Monitoring
+- `get_network_health` - Overall network health
+- `list_events` - Recent network events
+- `list_alarms` - Active alarms
+
+### Testing
+- `echo` - Echo test message
+
+## UniFi API
+
+The server uses two API paths (both work with `X-API-KEY` header):
+
+| API | Base Path | Used For |
+|-----|-----------|----------|
+| v1 Integrations | `/proxy/network/integrations/v1/` | Sites, clients, devices |
+| Classic | `/proxy/network/api/` | Health, networks, WLANs, events, alarms |
+
+## Key Files
+
+- `server.js` - Single-file server with all logic
+- `docker-compose.yml` - Docker configuration
+- `.env` - Environment variables (not in git)
+- `.env.example` - Template for .env
 
 ## Endpoints
 
@@ -43,245 +119,39 @@ MCP Client → /register (get client_id)
 |----------|------|---------|
 | `/health` | None | Health check |
 | `/.well-known/oauth-authorization-server` | None | OAuth discovery |
+| `/.well-known/oauth-protected-resource/mcp` | None | Resource metadata (RFC 9728) |
 | `/register` | None | Dynamic client registration |
 | `/authorize` | None | Start OAuth flow |
-| `/callback` | None | Cloudflare callback |
+| `/callback` | None | Cloudflare OAuth callback |
 | `/token` | None | Exchange code for token |
-| `/mcp` | Bearer | MCP protocol |
+| `/mcp` | Bearer | MCP protocol endpoint |
+| `/` | None | Dashboard (consider protecting) |
 
-## MCP Tools
+## Security Considerations
 
-- `list_clients` - List connected clients
-- `get_client` - Get client by MAC
-- `search_devices` - Search by name/MAC
-- `list_access_points` - List APs
-- `get_network_health` - Network health
-- `block_client` / `unblock_client` - Block/unblock MAC
-- `reconnect_client` - Force reconnect
-- `restart_device` - Restart device
-- `list_blocked_clients` - List blocked
+OAuth endpoints must be publicly accessible for MCP clients. Consider:
+1. **Cloudflare WAF** - Block non-MCP paths
+2. **Rate Limiting** - Protect `/register`, `/authorize`, `/token`
+3. **Cloudflare Access** - Protect `/` and `/health`
 
-## Verification Commands
+## Current Status (2026-02-04)
 
-```bash
-# Health
-curl https://unifi-mcp.thesacketts.org/health
+- ✅ OAuth 2.1 with PKCE working
+- ✅ Cloudflare Access for SaaS + Entra ID integration
+- ✅ Auto-registration for MCP clients (Claude Desktop compatible)
+- ✅ API key authentication for UniFi
+- ✅ MCP 2025-11-25 compliance
+- ✅ 18 MCP tools available
+- ✅ Dual API support (v1 + classic)
+- ⏳ WAF rules for additional security (optional)
 
-# OAuth discovery
-curl https://unifi-mcp.thesacketts.org/.well-known/oauth-authorization-server
+## Deployment
 
-# MCP without auth (should 401)
-curl -X POST https://unifi-mcp.thesacketts.org/mcp
-```
-
-## Cloudflare Setup Required
-
-1. **Access for SaaS Application:**
-   - Zero Trust → Access → Applications → Add → SaaS
-   - Protocol: OIDC
-   - Redirect URL: `https://unifi-mcp.thesacketts.org/callback`
-   - Copy: Client ID, Client Secret
-
-2. **Add to .env:**
-   ```
-   CF_ACCESS_TEAM=breezywillow
-   CF_CLIENT_ID=<from step 1>
-   CF_CLIENT_SECRET=<from step 1>
-   ```
-
-3. **Rebuild Docker:**
-   ```bash
-   docker compose build --no-cache && docker compose up -d
-   ```
-
-## Current Status (2026-02-03)
-
-- ✅ OAuth 2.1 with PKCE implemented
-- ✅ Cloudflare Access for SaaS as IdP
-- ✅ Dynamic client registration
-- ✅ Token validation on /mcp
-- ⏳ Needs CF_CLIENT_ID and CF_CLIENT_SECRET
-
-## Resuming Work
-
-1. OAuth 2.1 is implemented in server.js
-2. Cloudflare Access for SaaS is the identity provider
-3. MCP clients register → authorize → get token → access /mcp
-4. Never expose secrets in logs or responses
-
----
-
-## Update 2026-02-03 (Session 2)
-
-### Changes Made
-- Removed dev mode auth bypass (was auto-approving without Cloudflare)
-- OAuth now requires `OAUTH_ENABLED=true` (CF credentials configured)
-
-### Cloudflare Access Configuration (Multiple Apps)
-
-Per [Application Paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/), create separate Access Applications:
-
-| Access App | Domain/Path | Policy | Purpose |
-|------------|-------------|--------|---------|
-| `UniFi MCP - OAuth Discovery` | `unifi-mcp.thesacketts.org/.well-known/*` | Bypass | MCP client discovery |
-| `UniFi MCP - Register` | `unifi-mcp.thesacketts.org/register` | Bypass | Client registration |
-| `UniFi MCP - Authorize` | `unifi-mcp.thesacketts.org/authorize` | Bypass | Start OAuth |
-| `UniFi MCP - Callback` | `unifi-mcp.thesacketts.org/callback` | Bypass | CF redirect target |
-| `UniFi MCP - Token` | `unifi-mcp.thesacketts.org/token` | Bypass | Token exchange |
-| `UniFi MCP - Health` | `unifi-mcp.thesacketts.org/health` | Bypass | Health check |
-| `UniFi MCP - Root` | `unifi-mcp.thesacketts.org` | Allow (your users) | Protect dashboard |
-
-**Note:** More specific paths override broader ones. `/mcp` is protected by Bearer tokens (app-level), not CF Access edge policy.
-
-### Verification Commands
+Server runs on Raspberry Pi at `10.230.0.6`, exposed via Cloudflare Tunnel at `unifi-mcp.thesacketts.org`.
 
 ```bash
-# 1. OAuth discovery (should return JSON)
-curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-authorization-server
-
-# 2. Health (should return JSON)
-curl -s https://unifi-mcp.thesacketts.org/health
-
-# 3. MCP without token (should return 401)
-curl -s https://unifi-mcp.thesacketts.org/mcp
-
-# 4. Root (should redirect to CF login if protected)
-curl -s -I https://unifi-mcp.thesacketts.org/
+# Deploy updates
+ssh pi@10.230.0.6
+cd ~/unifi-mcp-server && git pull
+docker compose build --no-cache && docker compose up -d
 ```
-
-### Next Steps
-
-- [ ] Create Access Applications per table above
-- [ ] Deploy updated code: `git pull && docker compose build --no-cache && docker compose up -d`
-- [ ] Verify OAuth discovery returns JSON
-- [ ] Test MCP Portal connection
-
----
-
-## Update 2026-02-03 (Session 3) - MCP 2025-11-25 Compliance
-
-### Changes Made
-
-**RFC 9728 Protected Resource Metadata:**
-- Added `/.well-known/oauth-protected-resource/mcp` endpoint
-- Added `/.well-known/oauth-protected-resource` (root fallback)
-- Returns `resource`, `authorization_servers`, `scopes_supported`
-
-**WWW-Authenticate Header (401 responses):**
-- Now includes `resource_metadata` URL per spec
-- Includes `scope="mcp:tools"` guidance
-
-**Origin Validation (DNS rebinding protection):**
-- Validates Origin header on all /mcp requests
-- Allows localhost, 127.0.0.1, and same-origin
-- Returns 403 Forbidden for invalid origins
-
-**DELETE Method (session termination):**
-- Clients can explicitly terminate sessions via DELETE /mcp
-
-**Accept Header Validation:**
-- GET requires `text/event-stream`
-- POST requires `application/json` or `text/event-stream`
-
-**MCP-Protocol-Version Header:**
-- Logged during session initialization
-
-### Verification Commands
-
-```bash
-# Protected Resource Metadata (RFC 9728)
-curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-protected-resource/mcp
-
-# Authorization Server Metadata
-curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-authorization-server
-
-# 401 with WWW-Authenticate header
-curl -s -I https://unifi-mcp.thesacketts.org/mcp
-
-# Health
-curl -s https://unifi-mcp.thesacketts.org/health
-```
-
-### MCP 2025-11-25 Compliance Status
-
-| Requirement | Status |
-|-------------|--------|
-| Streamable HTTP POST/GET/DELETE | ✅ |
-| `/.well-known/oauth-protected-resource` (RFC 9728) | ✅ |
-| `WWW-Authenticate` with `resource_metadata` | ✅ |
-| Origin header validation | ✅ |
-| Accept header validation | ✅ |
-| MCP-Protocol-Version handling | ✅ |
-| PKCE S256 | ✅ |
-| Dynamic Client Registration | ✅ |
-
-### Next Steps
-
-- [x] Deploy: `git pull && docker compose build --no-cache && docker compose up -d`
-- [x] Test all new endpoints
-- [ ] Register with Cloudflare MCP Portal
-
----
-
-## Update 2026-02-03 (Session 4) - Cloudflare Access + Entra ID Integration
-
-### Current Status
-
-**MCP 2025-11-25 compliance is COMPLETE and verified:**
-
-```bash
-# All three endpoints confirmed working:
-curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-protected-resource/mcp
-# Returns: {"resource":"https://unifi-mcp.thesacketts.org/mcp","authorization_servers":["https://unifi-mcp.thesacketts.org"],...}
-
-curl -s https://unifi-mcp.thesacketts.org/.well-known/oauth-authorization-server
-# Returns: {"issuer":"https://unifi-mcp.thesacketts.org","authorization_endpoint":...}
-
-curl -s -I -X POST https://unifi-mcp.thesacketts.org/mcp -H "Accept: application/json"
-# Returns: HTTP/2 401 with www-authenticate: Bearer resource_metadata="..."
-```
-
-### Current Blocker
-
-**Error:** "Authentication Error - Failed to fetch user/group information from the identity provider"
-
-This error occurs when:
-1. User clicks "Connect" in Claude Desktop
-2. Browser opens Cloudflare Access login page
-3. User selects Entra ID and authenticates successfully
-4. **ERROR** - Cloudflare Access cannot retrieve user info from Entra ID
-
-### Root Cause
-
-Cloudflare Access for SaaS needs proper API permissions in Azure AD to fetch user claims.
-
-### Fix Required (Azure Portal)
-
-1. **Azure AD → App Registrations → [Your Cloudflare App]**
-
-2. **API Permissions** → Add:
-   - `Microsoft Graph` → `User.Read` (Delegated)
-   - `openid` (Delegated)
-   - `profile` (Delegated)
-   - `email` (Delegated)
-
-3. **Click "Grant admin consent"** for your organization
-
-4. **Token configuration** → Add optional claims to ID token:
-   - `email`
-   - `preferred_username`
-
-### Fix Required (Cloudflare Zero Trust)
-
-1. **Settings → Authentication → Login methods**
-2. Find Entra ID provider → Click **Test**
-3. If test fails, the Azure AD permissions are missing
-
-### Resume Checklist
-
-- [ ] Fix Entra ID API permissions (User.Read, openid, profile, email)
-- [ ] Grant admin consent in Azure
-- [ ] Add optional claims (email, preferred_username) to ID token
-- [ ] Test Entra ID provider in Cloudflare Zero Trust settings
-- [ ] Retry Claude Desktop connection
-- [ ] Register with Cloudflare MCP Portal

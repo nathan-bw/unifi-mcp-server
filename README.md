@@ -1,121 +1,172 @@
 # UniFi MCP Server
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server for managing UniFi networks through Claude or other MCP clients.
+A [Model Context Protocol](https://modelcontextprotocol.io/) server for managing UniFi networks through Claude Desktop or other MCP clients.
 
 ## Features
 
-- **Network Monitoring** - List clients, access points, and network health
-- **Device Management** - Block/unblock devices, restart APs, force reconnections
-- **Search** - Find devices by name, IP, or MAC address
-- **OAuth 2.1 Authentication** - Full MCP OAuth 2.1 compliance with PKCE
-- **Cloudflare Access Integration** - Uses Cloudflare Access as the identity provider
+- **18 MCP Tools** - Comprehensive network management capabilities
+- **OAuth 2.1 + PKCE** - Secure authentication with Cloudflare Access
+- **API Key Authentication** - Uses official UniFi API with X-API-KEY
+- **MCP 2025-11-25 Compliant** - Full specification compliance
 - **Remote Ready** - Designed for access via Cloudflare Tunnel
 
 ## Quick Start
 
+### 1. Generate UniFi API Key
+
+In your UniFi Controller/UDM:
+- Go to **Settings → Control Plane → Integrations**
+- Click **Generate API Key**
+- Copy the key
+
+### 2. Configure Environment
+
 ```bash
-# 1. Clone and setup
 cp .env.example .env
-# Edit .env with your UniFi credentials and BASE_URL
-
-# 2. Start with Docker
-docker compose up -d
-
-# 3. Configure Cloudflare Tunnel + Access (see SETUP.md)
 ```
 
-See [SETUP.md](SETUP.md) for detailed configuration instructions.
+Edit `.env`:
+```bash
+# Server
+BASE_URL=https://your-domain.com
+
+# Cloudflare Access for SaaS (OAuth identity provider)
+CF_ACCESS_TEAM=your-team-name
+CF_CLIENT_ID=your-client-id
+CF_CLIENT_SECRET=your-client-secret
+
+# UniFi Controller
+UNIFI_HOST=192.168.1.1
+UNIFI_API_KEY=your-api-key-from-step-1
+```
+
+### 3. Start with Docker
+
+```bash
+docker compose up -d
+```
+
+### 4. Configure Cloudflare
+
+1. Create a **Cloudflare Tunnel** pointing to your server
+2. Create an **Access for SaaS** application in Zero Trust:
+   - Protocol: OIDC
+   - Redirect URL: `https://your-domain.com/callback`
+3. Connect with Claude Desktop using your tunnel URL
 
 ## Available Tools
 
+### Client Management
 | Tool | Description |
 |------|-------------|
 | `list_clients` | List all connected devices |
-| `get_client` | Get details for a specific client |
+| `get_client` | Get details for a specific client by MAC |
 | `search_devices` | Search by name, IP, or MAC |
-| `list_access_points` | List all APs with status |
-| `get_network_health` | Network health statistics |
 | `block_client` | Block a device from the network |
 | `unblock_client` | Unblock a device |
 | `reconnect_client` | Force a client to reconnect |
-| `restart_device` | Restart an AP or switch |
 | `list_blocked_clients` | List blocked devices |
+
+### Device Management
+| Tool | Description |
+|------|-------------|
+| `list_devices` | List all UniFi devices (APs, switches, gateways) |
+| `list_access_points` | List access points with status |
+| `restart_device` | Restart an AP or switch |
+
+### Network Configuration
+| Tool | Description |
+|------|-------------|
+| `list_networks` | List VLANs and subnets |
+| `list_wlans` | List wireless SSIDs |
+| `list_port_forwards` | List port forwarding rules |
+
+### Monitoring
+| Tool | Description |
+|------|-------------|
+| `get_network_health` | Network health statistics |
+| `list_events` | Recent network events |
+| `list_alarms` | Active and recent alarms |
 
 ## Architecture
 
 ```
-MCP Client → Cloudflare Access → Cloudflare Tunnel → MCP Server → UniFi Controller
-              (Edge Auth)         (Secure tunnel)     (OAuth 2.1)    (Local API)
+Claude Desktop
+      ↓
+Cloudflare Tunnel (secure tunnel)
+      ↓
+UniFi MCP Server (OAuth 2.1 + MCP)
+      ↓
+UniFi Controller/UDM (X-API-KEY)
 ```
 
-## Authentication
+## Authentication Flow
 
-This server implements a **two-layer authentication** approach:
+This server implements OAuth 2.1 with Cloudflare Access as the identity provider:
 
-### Layer 1: Cloudflare Access (Edge)
-- All requests must pass through Cloudflare Access before reaching your server
-- Supports any identity provider (Google, GitHub, Okta, SAML, etc.)
-- Adds `Cf-Access-Authenticated-User-Email` header to authenticated requests
+1. MCP client discovers OAuth endpoints via `/.well-known/oauth-authorization-server`
+2. Client initiates OAuth flow to `/authorize` with PKCE
+3. User authenticates via Cloudflare Access (supports Entra ID, Google, etc.)
+4. Upon approval, client exchanges code for tokens at `/token`
+5. Client accesses `/mcp` with Bearer token
 
-### Layer 2: OAuth 2.1 (MCP Protocol)
-- Implements the MCP OAuth 2.1 specification for client authorization
-- Full PKCE support for secure token exchange
-- Dynamic client registration for MCP clients
-- The consent page uses the Cloudflare Access identity
-
-### OAuth 2.1 Endpoints
+### OAuth Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
 | `/.well-known/oauth-authorization-server` | Authorization server metadata |
-| `/.well-known/oauth-protected-resource` | Protected resource metadata |
-| `/authorize` | Authorization endpoint |
+| `/.well-known/oauth-protected-resource/mcp` | Protected resource metadata (RFC 9728) |
+| `/authorize` | Authorization endpoint (auto-registers clients) |
 | `/token` | Token endpoint |
 | `/register` | Dynamic client registration |
-| `/consent` | User consent page (uses CF Access identity) |
-
-### How It Works
-
-1. MCP client discovers OAuth endpoints via `/.well-known/oauth-authorization-server`
-2. Client registers dynamically via `/register`
-3. Client initiates OAuth flow to `/authorize` with PKCE
-4. User is redirected to `/consent` where Cloudflare Access identity is used
-5. Upon approval, client exchanges code for tokens at `/token`
-6. Client accesses `/mcp` with Bearer token
+| `/callback` | Cloudflare OAuth callback |
 
 ## Configuration
 
-| Variable | Description |
-|----------|-------------|
-| `PORT` | Server port (default: 3000) |
-| `BASE_URL` | Public URL of the server (for OAuth redirects) |
-| `CF_ACCESS_TEAM` | Cloudflare Access team name (optional, for validation) |
-| `CF_ACCESS_AUD` | Application Audience tag for JWT validation (optional) |
-| `ALLOWED_EMAILS` | Comma-separated list of allowed emails (optional) |
-| `UNIFI_HOST` | UniFi controller IP address |
-| `UNIFI_PORT` | UniFi controller port (default: 443) |
-| `UNIFI_USERNAME` | UniFi admin username |
-| `UNIFI_PASSWORD` | UniFi admin password |
-| `UNIFI_SITE` | UniFi site name (default: "default") |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `PORT` | No | Server port (default: 3000) |
+| `BASE_URL` | Yes | Public URL for OAuth redirects |
+| `CF_ACCESS_TEAM` | Yes | Cloudflare Access team name |
+| `CF_CLIENT_ID` | Yes | From Access for SaaS app |
+| `CF_CLIENT_SECRET` | Yes | From Access for SaaS app |
+| `UNIFI_HOST` | Yes | UniFi controller IP |
+| `UNIFI_PORT` | No | Controller port (default: 443) |
+| `UNIFI_API_KEY` | Yes | API key from UniFi |
+| `UNIFI_SITE` | No | Site name (default: "default") |
 
-## Using with Cloudflare MCP Portal
+## Security
 
-This server is designed to work with the [Cloudflare MCP Portal](https://developers.cloudflare.com/mcp):
+- **OAuth 2.1 + PKCE** - Secure token exchange
+- **Cloudflare Tunnel** - No direct IP exposure
+- **Cloudflare Access** - Identity verification at the edge
+- **API Key Auth** - No passwords stored, scoped access
 
-1. Deploy behind Cloudflare Tunnel with Access
-2. Set `BASE_URL` to your public Cloudflare URL
-3. Add to Cloudflare MCP Portal using your tunnel URL
+### Recommended WAF Rules
 
-The Portal will discover OAuth endpoints and guide users through authentication.
+Consider blocking non-essential paths:
+- Allow: `/.well-known/*`, `/register`, `/authorize`, `/callback`, `/token`, `/mcp`
+- Block or protect: `/`, `/health`
 
 ## Tech Stack
 
 - Node.js 22 with ES Modules
-- [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) v1.25+
-- [mcp-oauth-server](https://www.npmjs.com/package/mcp-oauth-server) v0.0.3+
-- [node-unifi](https://github.com/jens-maus/node-unifi) v2.5+
+- [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk)
 - Express.js
 - Docker with Alpine Linux
+
+## Development
+
+```bash
+# Install dependencies
+npm install
+
+# Run with hot-reload
+npm run dev
+
+# Check syntax
+node --check server.js
+```
 
 ## License
 
