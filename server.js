@@ -452,15 +452,48 @@ app.post('/register', (req, res) => {
 app.get('/authorize', (req, res) => {
   const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope, response_type } = req.query;
 
-  // Validate client
-  const client = registeredClients.get(client_id);
-  if (!client) {
-    return res.status(400).json({ error: 'invalid_client', error_description: 'Unknown client_id' });
+  if (!client_id || !redirect_uri) {
+    return res.status(400).json({ error: 'invalid_request', error_description: 'client_id and redirect_uri required' });
   }
 
-  // Validate redirect_uri
+  // Auto-register unknown clients (MCP clients like Claude Desktop don't call /register first)
+  let client = registeredClients.get(client_id);
+  if (!client) {
+    // Validate redirect_uri is localhost (safe for public clients)
+    try {
+      const redirectUrl = new URL(redirect_uri);
+      if (redirectUrl.hostname !== 'localhost' && redirectUrl.hostname !== '127.0.0.1') {
+        return res.status(400).json({ error: 'invalid_request', error_description: 'Only localhost redirect_uri allowed for auto-registration' });
+      }
+    } catch (e) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' });
+    }
+
+    // Auto-register as public client
+    client = {
+      client_secret: null, // Public client, no secret
+      redirect_uris: [redirect_uri],
+      client_name: 'Auto-registered MCP Client',
+      created: Date.now(),
+    };
+    registeredClients.set(client_id, client);
+    console.log(`[OAuth] Auto-registered client: ${client_id}`);
+  }
+
+  // Validate redirect_uri matches registered URIs (add new ones for existing clients)
   if (!client.redirect_uris.includes(redirect_uri)) {
-    return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' });
+    // For auto-registered clients, allow adding localhost URIs
+    try {
+      const redirectUrl = new URL(redirect_uri);
+      if (redirectUrl.hostname === 'localhost' || redirectUrl.hostname === '127.0.0.1') {
+        client.redirect_uris.push(redirect_uri);
+        console.log(`[OAuth] Added redirect_uri for client ${client_id}: ${redirect_uri}`);
+      } else {
+        return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' });
+      }
+    } catch (e) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' });
+    }
   }
 
   // Require PKCE
