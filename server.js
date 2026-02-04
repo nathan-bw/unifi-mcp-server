@@ -65,14 +65,41 @@ class UniFiController {
     this.siteId = null;
   }
 
-  // Make authenticated API request
+  // Make authenticated API request (v1 integrations API)
   async api(endpoint, options = {}) {
     if (!UNIFI_ENABLED) {
       throw new Error('UniFi controller not configured. Set UNIFI_HOST and UNIFI_API_KEY.');
     }
 
     const url = `${this.baseUrl}/proxy/network/integrations/v1${endpoint}`;
-    console.log(`[UniFi] API: ${options.method || 'GET'} ${endpoint}`);
+    console.log(`[UniFi] API v1: ${options.method || 'GET'} ${endpoint}`);
+
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        'X-API-KEY': UNIFI_API_KEY,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`UniFi API error ${response.status}: ${text}`);
+    }
+
+    return response.json();
+  }
+
+  // Make request to the classic API (more endpoints available)
+  async classicApi(endpoint, options = {}) {
+    if (!UNIFI_ENABLED) {
+      throw new Error('UniFi controller not configured. Set UNIFI_HOST and UNIFI_API_KEY.');
+    }
+
+    const url = `${this.baseUrl}/proxy/network/api${endpoint}`;
+    console.log(`[UniFi] Classic API: ${options.method || 'GET'} ${endpoint}`);
 
     const response = await fetch(url, {
       ...options,
@@ -151,15 +178,112 @@ class UniFiController {
   }
 
   async getHealth() {
-    const siteId = await this.getSiteId();
-    const data = await this.api(`/sites/${siteId}`);
+    // Use classic API for health - more detailed data
+    const data = await this.classicApi(`/s/${UNIFI_SITE}/stat/health`);
     return data.data || data;
   }
 
   async getSiteStats() {
-    const data = await this.api('/sites');
+    // Use classic API for full site stats
+    const data = await this.classicApi('/stat/sites');
     const sites = data.data || data;
     return sites.find(s => s.name === UNIFI_SITE || s.desc === UNIFI_SITE) || sites[0];
+  }
+
+  async getAllDevices() {
+    const siteId = await this.getSiteId();
+    const data = await this.api(`/sites/${siteId}/devices`);
+    const devices = data.data || data;
+    return devices.map(d => ({
+      mac: d.mac,
+      name: d.name || d.display_name || 'Unnamed',
+      model: d.model || 'Unknown',
+      type: d.type || 'unknown',
+      ip: d.ip || 'N/A',
+      state: d.state === 1 || d.status === 'ONLINE' ? 'connected' : 'disconnected',
+      adopted: d.adopted ?? true,
+      version: d.version || d.firmware || '',
+      uptime: d.uptime || 0,
+      numClients: d.num_sta || d.client_count || 0,
+    }));
+  }
+
+  async getNetworks() {
+    const data = await this.classicApi(`/s/${UNIFI_SITE}/rest/networkconf`);
+    const networks = data.data || data;
+    return networks.map(n => ({
+      id: n._id,
+      name: n.name,
+      purpose: n.purpose || 'corporate',
+      vlan: n.vlan || null,
+      subnet: n.ip_subnet || null,
+      dhcpEnabled: n.dhcpd_enabled || false,
+      dhcpStart: n.dhcpd_start || null,
+      dhcpStop: n.dhcpd_stop || null,
+      domainName: n.domain_name || null,
+      enabled: n.enabled !== false,
+    }));
+  }
+
+  async getWlans() {
+    const data = await this.classicApi(`/s/${UNIFI_SITE}/rest/wlanconf`);
+    const wlans = data.data || data;
+    return wlans.map(w => ({
+      id: w._id,
+      name: w.name,
+      ssid: w.name, // SSID is typically the name
+      enabled: w.enabled !== false,
+      security: w.security || 'open',
+      wpaMode: w.wpa_mode || null,
+      isGuest: w.is_guest || false,
+      vlan: w.vlan || null,
+      networkId: w.networkconf_id || null,
+      hideSSID: w.hide_ssid || false,
+    }));
+  }
+
+  async getEvents(limit = 50) {
+    const data = await this.classicApi(`/s/${UNIFI_SITE}/stat/event?_limit=${limit}`);
+    const events = data.data || data;
+    return events.map(e => ({
+      id: e._id,
+      time: e.time ? new Date(e.time).toISOString() : null,
+      datetime: e.datetime || null,
+      key: e.key || 'unknown',
+      message: e.msg || '',
+      subsystem: e.subsystem || '',
+      user: e.user || e.guest || null,
+      hostname: e.hostname || null,
+      mac: e.client || e.ap || null,
+    }));
+  }
+
+  async getAlarms(limit = 50) {
+    const data = await this.classicApi(`/s/${UNIFI_SITE}/stat/alarm?_limit=${limit}`);
+    const alarms = data.data || data;
+    return alarms.map(a => ({
+      id: a._id,
+      time: a.time ? new Date(a.time).toISOString() : null,
+      key: a.key || 'unknown',
+      message: a.msg || '',
+      archived: a.archived || false,
+      deviceMac: a.ap || a.gw || a.sw || null,
+      deviceName: a.ap_name || a.gw_name || a.sw_name || null,
+    }));
+  }
+
+  async getPortForwards() {
+    const data = await this.classicApi(`/s/${UNIFI_SITE}/rest/portforward`);
+    const rules = data.data || data;
+    return rules.map(r => ({
+      id: r._id,
+      name: r.name,
+      enabled: r.enabled !== false,
+      proto: r.proto || 'tcp_udp',
+      srcPort: r.src || r.dst_port,
+      destPort: r.fwd_port || r.dst_port,
+      destIp: r.fwd || null,
+    }));
   }
 
   async blockClient(mac) {
@@ -343,6 +467,86 @@ function createMcpServer() {
     try {
       const blocked = await unifi.getBlockedClients();
       return { content: [{ type: 'text', text: JSON.stringify({ count: blocked.length, blockedClients: blocked }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+  });
+
+  // Tool: List All Devices
+  server.registerTool('list_devices', {
+    title: 'List All Devices',
+    description: 'List all UniFi devices (APs, switches, gateways, etc.) with status.',
+  }, async () => {
+    try {
+      const devices = await unifi.getAllDevices();
+      return { content: [{ type: 'text', text: JSON.stringify({ count: devices.length, devices }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+  });
+
+  // Tool: List Networks
+  server.registerTool('list_networks', {
+    title: 'List Networks',
+    description: 'List all configured networks (VLANs, subnets) on the UniFi controller.',
+  }, async () => {
+    try {
+      const networks = await unifi.getNetworks();
+      return { content: [{ type: 'text', text: JSON.stringify({ count: networks.length, networks }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+  });
+
+  // Tool: List WLANs
+  server.registerTool('list_wlans', {
+    title: 'List WLANs',
+    description: 'List all wireless networks (SSIDs) configured on the UniFi controller.',
+  }, async () => {
+    try {
+      const wlans = await unifi.getWlans();
+      return { content: [{ type: 'text', text: JSON.stringify({ count: wlans.length, wlans }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+  });
+
+  // Tool: List Events
+  server.registerTool('list_events', {
+    title: 'List Recent Events',
+    description: 'List recent events from the UniFi controller (connections, disconnections, etc.).',
+    inputSchema: { limit: z.number().optional().describe('Maximum number of events to return (default: 50)') },
+  }, async ({ limit }) => {
+    try {
+      const events = await unifi.getEvents(limit || 50);
+      return { content: [{ type: 'text', text: JSON.stringify({ count: events.length, events }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+  });
+
+  // Tool: List Alarms
+  server.registerTool('list_alarms', {
+    title: 'List Alarms',
+    description: 'List active and recent alarms from the UniFi controller.',
+    inputSchema: { limit: z.number().optional().describe('Maximum number of alarms to return (default: 50)') },
+  }, async ({ limit }) => {
+    try {
+      const alarms = await unifi.getAlarms(limit || 50);
+      return { content: [{ type: 'text', text: JSON.stringify({ count: alarms.length, alarms }, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+  });
+
+  // Tool: List Port Forwards
+  server.registerTool('list_port_forwards', {
+    title: 'List Port Forwards',
+    description: 'List all port forwarding rules configured on the UniFi gateway.',
+  }, async () => {
+    try {
+      const rules = await unifi.getPortForwards();
+      return { content: [{ type: 'text', text: JSON.stringify({ count: rules.length, portForwards: rules }, null, 2) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
     }
