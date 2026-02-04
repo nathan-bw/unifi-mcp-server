@@ -12,7 +12,6 @@ import { randomUUID, createHash } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
-import Unifi from 'node-unifi';
 
 // =============================================================================
 // Configuration
@@ -36,13 +35,12 @@ const CF_USERINFO_URL = CF_ISSUER ? `${CF_ISSUER}/userinfo` : null;
 
 const OAUTH_ENABLED = Boolean(CF_ACCESS_TEAM && CF_CLIENT_ID && CF_CLIENT_SECRET);
 
-// UniFi configuration
+// UniFi configuration (API key authentication only)
 const UNIFI_HOST = process.env.UNIFI_HOST;
 const UNIFI_PORT = parseInt(process.env.UNIFI_PORT || '443', 10);
-const UNIFI_USERNAME = process.env.UNIFI_USERNAME;
-const UNIFI_PASSWORD = process.env.UNIFI_PASSWORD;
+const UNIFI_API_KEY = process.env.UNIFI_API_KEY;
 const UNIFI_SITE = process.env.UNIFI_SITE || 'default';
-const UNIFI_ENABLED = Boolean(UNIFI_HOST && UNIFI_USERNAME && UNIFI_PASSWORD);
+const UNIFI_ENABLED = Boolean(UNIFI_HOST && UNIFI_API_KEY);
 
 // Startup info
 console.log('');
@@ -53,137 +51,144 @@ if (!OAUTH_ENABLED) {
   console.warn('⚠️  OAuth not configured. Set CF_ACCESS_TEAM, CF_CLIENT_ID, CF_CLIENT_SECRET.');
 }
 if (!UNIFI_ENABLED) {
-  console.warn('⚠️  UniFi controller not configured. UniFi tools will return errors.');
+  console.warn('⚠️  UniFi controller not configured. Set UNIFI_HOST and UNIFI_API_KEY.');
 }
 
 
 // =============================================================================
-// UniFi Controller Class
+// UniFi Controller Class (API Key Authentication)
 // =============================================================================
 
 class UniFiController {
   constructor() {
-    this.controller = null;
-    this.connected = false;
+    this.baseUrl = `https://${UNIFI_HOST}:${UNIFI_PORT}`;
+    this.siteId = null;
   }
 
-  async connect() {
+  // Make authenticated API request
+  async api(endpoint, options = {}) {
     if (!UNIFI_ENABLED) {
-      throw new Error('UniFi controller not configured. Set UNIFI_HOST, UNIFI_USERNAME, and UNIFI_PASSWORD.');
+      throw new Error('UniFi controller not configured. Set UNIFI_HOST and UNIFI_API_KEY.');
     }
 
-    if (this.connected) {
-      return;
-    }
+    const url = `${this.baseUrl}/proxy/network/integrations/v1${endpoint}`;
+    console.log(`[UniFi] API: ${options.method || 'GET'} ${endpoint}`);
 
-    this.controller = new Unifi.Controller({
-      host: UNIFI_HOST,
-      port: UNIFI_PORT,
-      sslverify: false,
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        'X-API-KEY': UNIFI_API_KEY,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
     });
 
-    await this.controller.login(UNIFI_USERNAME, UNIFI_PASSWORD);
-    this.connected = true;
-    console.log('[UniFi] Connected to controller');
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`UniFi API error ${response.status}: ${text}`);
+    }
+
+    return response.json();
   }
 
-  async ensureConnected() {
-    if (!this.connected) {
-      await this.connect();
-    }
+  // Get the site ID (cached after first call)
+  async getSiteId() {
+    if (this.siteId) return this.siteId;
+
+    const data = await this.api('/sites');
+    const sites = data.data || data;
+    const site = sites.find(s => s.name === UNIFI_SITE || s.desc === UNIFI_SITE) || sites[0];
+    if (!site) throw new Error('No UniFi site found');
+    this.siteId = site._id || site.id;
+    console.log(`[UniFi] Using site: ${site.name || site.desc} (${this.siteId})`);
+    return this.siteId;
   }
 
   async getClients() {
-    await this.ensureConnected();
-    const clients = await this.controller.getClientDevices(UNIFI_SITE);
+    const siteId = await this.getSiteId();
+    const data = await this.api(`/sites/${siteId}/clients`);
+    const clients = data.data || data;
     return clients.map(c => ({
       mac: c.mac,
-      hostname: c.hostname || c.name || 'Unknown',
-      ip: c.ip || 'N/A',
+      hostname: c.hostname || c.name || c.display_name || 'Unknown',
+      ip: c.ip || c.fixed_ip || 'N/A',
       oui: c.oui || '',
-      isWired: c.is_wired || false,
-      network: c.network || '',
-      experience: c.satisfaction || null,
-      signalStrength: c.signal || null,
-      txRate: c.tx_rate || null,
-      rxRate: c.rx_rate || null,
+      isWired: c.is_wired || c.type === 'WIRED',
+      network: c.network || c.network_name || '',
+      experience: c.satisfaction || c.score || null,
+      signalStrength: c.signal || c.rssi || null,
       uptime: c.uptime || 0,
-      lastSeen: c.last_seen ? new Date(c.last_seen * 1000).toISOString() : null,
-      txBytes: c.tx_bytes || 0,
-      rxBytes: c.rx_bytes || 0,
-      apMac: c.ap_mac || null,
+      lastSeen: c.last_seen ? new Date(c.last_seen * 1000).toISOString() : (c.lastSeen || null),
       isBlocked: c.blocked || false,
-      isGuest: c.is_guest || false,
+      isGuest: c.is_guest || c.guest || false,
     }));
   }
 
   async getClient(mac) {
-    await this.ensureConnected();
-    const clients = await this.controller.getClientDevices(UNIFI_SITE, mac);
-    return clients[0] || null;
+    const clients = await this.getClients();
+    return clients.find(c => c.mac.toLowerCase() === mac.toLowerCase()) || null;
   }
 
   async getAccessPoints() {
-    await this.ensureConnected();
-    const devices = await this.controller.getAccessDevices(UNIFI_SITE);
-    return devices.map(d => ({
-      mac: d.mac,
-      name: d.name || 'Unnamed AP',
-      model: d.model || 'Unknown',
-      ip: d.ip || 'N/A',
-      state: d.state === 1 ? 'connected' : 'disconnected',
-      adopted: d.adopted || false,
-      version: d.version || '',
-      uptime: d.uptime || 0,
-      numClients: d.num_sta || 0,
-      experience: d.satisfaction || null,
-      channel2g: d['ng-channel'] || null,
-      channel5g: d['na-channel'] || null,
-      txPower2g: d['ng-tx_power'] || null,
-      txPower5g: d['na-tx_power'] || null,
-    }));
+    const siteId = await this.getSiteId();
+    const data = await this.api(`/sites/${siteId}/devices`);
+    const devices = data.data || data;
+    // Filter for access points
+    return devices
+      .filter(d => d.type === 'uap' || d.model?.startsWith('U'))
+      .map(d => ({
+        mac: d.mac,
+        name: d.name || d.display_name || 'Unnamed AP',
+        model: d.model || 'Unknown',
+        ip: d.ip || 'N/A',
+        state: d.state === 1 || d.status === 'ONLINE' ? 'connected' : 'disconnected',
+        adopted: d.adopted ?? true,
+        version: d.version || d.firmware || '',
+        uptime: d.uptime || 0,
+        numClients: d.num_sta || d.client_count || 0,
+      }));
   }
 
   async getHealth() {
-    await this.ensureConnected();
-    const health = await this.controller.getHealth(UNIFI_SITE);
-    return health;
+    const siteId = await this.getSiteId();
+    const data = await this.api(`/sites/${siteId}`);
+    return data.data || data;
   }
 
   async getSiteStats() {
-    await this.ensureConnected();
-    const stats = await this.controller.getSitesStats();
-    return stats.find(s => s.name === UNIFI_SITE) || stats[0];
+    const data = await this.api('/sites');
+    const sites = data.data || data;
+    return sites.find(s => s.name === UNIFI_SITE || s.desc === UNIFI_SITE) || sites[0];
   }
 
   async blockClient(mac) {
-    await this.ensureConnected();
-    await this.controller.blockClient(UNIFI_SITE, mac.toLowerCase());
+    const siteId = await this.getSiteId();
+    await this.api(`/sites/${siteId}/clients/${mac.toLowerCase()}/block`, { method: 'POST' });
     return { success: true, message: `Blocked client ${mac}` };
   }
 
   async unblockClient(mac) {
-    await this.ensureConnected();
-    await this.controller.unblockClient(UNIFI_SITE, mac.toLowerCase());
+    const siteId = await this.getSiteId();
+    await this.api(`/sites/${siteId}/clients/${mac.toLowerCase()}/unblock`, { method: 'POST' });
     return { success: true, message: `Unblocked client ${mac}` };
   }
 
   async reconnectClient(mac) {
-    await this.ensureConnected();
-    await this.controller.reconnectClient(UNIFI_SITE, mac.toLowerCase());
+    const siteId = await this.getSiteId();
+    await this.api(`/sites/${siteId}/clients/${mac.toLowerCase()}/reconnect`, { method: 'POST' });
     return { success: true, message: `Reconnected client ${mac}` };
   }
 
   async restartDevice(mac) {
-    await this.ensureConnected();
-    await this.controller.restartDevice(UNIFI_SITE, mac.toLowerCase());
+    const siteId = await this.getSiteId();
+    await this.api(`/sites/${siteId}/devices/${mac.toLowerCase()}/restart`, { method: 'POST' });
     return { success: true, message: `Restart initiated for device ${mac}` };
   }
 
   async getBlockedClients() {
-    await this.ensureConnected();
-    const blocked = await this.controller.getBlockedUsers(UNIFI_SITE);
-    return blocked;
+    const clients = await this.getClients();
+    return clients.filter(c => c.isBlocked);
   }
 }
 

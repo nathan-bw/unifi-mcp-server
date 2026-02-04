@@ -23,12 +23,12 @@ services:
       - CF_ACCESS_TEAM=${CF_ACCESS_TEAM}
       - CF_CLIENT_ID=${CF_CLIENT_ID}
       - CF_CLIENT_SECRET=${CF_CLIENT_SECRET}
-      # UniFi Controller
+      # UniFi Controller (API Key auth)
       - UNIFI_HOST=${UNIFI_HOST}
       - UNIFI_PORT=${UNIFI_PORT:-443}
-      - UNIFI_USERNAME=${UNIFI_USERNAME}
-      - UNIFI_PASSWORD=${UNIFI_PASSWORD}
+      - UNIFI_API_KEY=${UNIFI_API_KEY}
       - UNIFI_SITE=${UNIFI_SITE:-default}
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
 
     # Expose port to host
     # Your Cloudflare tunnel will connect to this port
