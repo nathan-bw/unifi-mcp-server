@@ -572,25 +572,14 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// CORS middleware - required for Cloudflare MCP Portal browser requests
+// CORS middleware - allow cross-origin requests for browser-based MCP clients
 app.use((req, res, next) => {
-  // Allow requests from Cloudflare domains and localhost
-  const allowedOrigins = [
-    'https://dash.cloudflare.com',
-    'https://one.dash.cloudflare.com',
-    'https://playground.ai.cloudflare.com',
-    /\.cloudflare\.com$/,
-    /\.cloudflareaccess\.com$/,
-  ];
-
   const origin = req.headers.origin;
+
+  // For public servers, allow all origins (echo back the requesting origin)
+  // CORS is a browser security feature; server-side auth (OAuth) provides real security
   if (origin) {
-    const isAllowed = allowedOrigins.some(allowed =>
-      typeof allowed === 'string' ? allowed === origin : allowed.test(origin)
-    );
-    if (isAllowed) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-    }
+    res.setHeader('Access-Control-Allow-Origin', origin);
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -700,6 +689,7 @@ app.get('/authorize', (req, res) => {
   }
 
   // Helper function to check if redirect_uri is trusted
+  // For public servers, allow any HTTPS redirect_uri or localhost
   const isTrustedRedirectUri = (uri) => {
     try {
       const url = new URL(uri);
@@ -707,8 +697,8 @@ app.get('/authorize', (req, res) => {
       if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
         return true;
       }
-      // Allow Cloudflare domains (MCP Portal, Playground)
-      if (url.hostname.endsWith('.cloudflare.com') || url.hostname.endsWith('.cloudflareaccess.com')) {
+      // Allow any HTTPS redirect_uri (public server, OAuth provides security)
+      if (url.protocol === 'https:') {
         return true;
       }
       return false;
@@ -1005,38 +995,35 @@ app.get('/', (req, res) => {
 // =============================================================================
 
 // Origin validation middleware (required by MCP 2025-11-25 for DNS rebinding protection)
+// For public servers (not localhost), DNS rebinding is not a concern - allow all origins
+// For localhost servers, restrict to localhost origins only
 function validateOrigin(req, res, next) {
   const origin = req.headers.origin;
 
-  // Allow requests without Origin (non-browser clients)
+  // Allow requests without Origin (non-browser/server-side clients)
   if (!origin) {
     return next();
   }
 
+  // Check if this server is public (not localhost)
+  const baseUrl = new URL(BASE_URL);
+  const isPublicServer = baseUrl.hostname !== 'localhost' && baseUrl.hostname !== '127.0.0.1';
+
+  // Public servers: allow all origins (DNS rebinding not a concern)
+  if (isPublicServer) {
+    return next();
+  }
+
+  // Localhost servers: only allow localhost origins (DNS rebinding protection)
   try {
     const originUrl = new URL(origin);
-
-    // Allow localhost for development
     if (originUrl.hostname === 'localhost' || originUrl.hostname === '127.0.0.1') {
-      return next();
-    }
-
-    // Allow requests from same origin
-    const baseUrl = new URL(BASE_URL);
-    if (originUrl.hostname === baseUrl.hostname) {
-      return next();
-    }
-
-    // Allow Cloudflare domains (MCP Portal, Playground, Dashboard)
-    if (originUrl.hostname.endsWith('.cloudflare.com') ||
-        originUrl.hostname.endsWith('.cloudflareaccess.com')) {
       return next();
     }
   } catch (e) {
     // Invalid origin URL
   }
 
-  // Reject other origins
   console.warn(`[MCP] Rejected request from origin: ${origin}`);
   return res.status(403).json({ error: 'forbidden', error_description: 'Invalid origin' });
 }
