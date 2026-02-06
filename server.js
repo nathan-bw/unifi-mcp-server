@@ -699,17 +699,30 @@ app.get('/authorize', (req, res) => {
     return res.status(400).json({ error: 'invalid_request', error_description: 'client_id and redirect_uri required' });
   }
 
-  // Auto-register unknown clients (MCP clients like Claude Desktop don't call /register first)
+  // Helper function to check if redirect_uri is trusted
+  const isTrustedRedirectUri = (uri) => {
+    try {
+      const url = new URL(uri);
+      // Allow localhost (Claude Desktop, local development)
+      if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+        return true;
+      }
+      // Allow Cloudflare domains (MCP Portal, Playground)
+      if (url.hostname.endsWith('.cloudflare.com') || url.hostname.endsWith('.cloudflareaccess.com')) {
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  // Auto-register unknown clients (MCP clients may not call /register first)
   let client = registeredClients.get(client_id);
   if (!client) {
-    // Validate redirect_uri is localhost (safe for public clients)
-    try {
-      const redirectUrl = new URL(redirect_uri);
-      if (redirectUrl.hostname !== 'localhost' && redirectUrl.hostname !== '127.0.0.1') {
-        return res.status(400).json({ error: 'invalid_request', error_description: 'Only localhost redirect_uri allowed for auto-registration' });
-      }
-    } catch (e) {
-      return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' });
+    // Validate redirect_uri is trusted
+    if (!isTrustedRedirectUri(redirect_uri)) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'Untrusted redirect_uri for auto-registration' });
     }
 
     // Auto-register as public client
@@ -725,17 +738,12 @@ app.get('/authorize', (req, res) => {
 
   // Validate redirect_uri matches registered URIs (add new ones for existing clients)
   if (!client.redirect_uris.includes(redirect_uri)) {
-    // For auto-registered clients, allow adding localhost URIs
-    try {
-      const redirectUrl = new URL(redirect_uri);
-      if (redirectUrl.hostname === 'localhost' || redirectUrl.hostname === '127.0.0.1') {
-        client.redirect_uris.push(redirect_uri);
-        console.log(`[OAuth] Added redirect_uri for client ${client_id}: ${redirect_uri}`);
-      } else {
-        return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' });
-      }
-    } catch (e) {
-      return res.status(400).json({ error: 'invalid_request', error_description: 'Invalid redirect_uri' });
+    // Allow adding trusted redirect_uris
+    if (isTrustedRedirectUri(redirect_uri)) {
+      client.redirect_uris.push(redirect_uri);
+      console.log(`[OAuth] Added redirect_uri for client ${client_id}: ${redirect_uri}`);
+    } else {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'Untrusted redirect_uri' });
     }
   }
 
