@@ -572,6 +572,40 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// CORS middleware - required for Cloudflare MCP Portal browser requests
+app.use((req, res, next) => {
+  // Allow requests from Cloudflare domains and localhost
+  const allowedOrigins = [
+    'https://dash.cloudflare.com',
+    'https://one.dash.cloudflare.com',
+    'https://playground.ai.cloudflare.com',
+    /\.cloudflare\.com$/,
+    /\.cloudflareaccess\.com$/,
+  ];
+
+  const origin = req.headers.origin;
+  if (origin) {
+    const isAllowed = allowedOrigins.some(allowed =>
+      typeof allowed === 'string' ? allowed === origin : allowed.test(origin)
+    );
+    if (isAllowed) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, MCP-Session-ID, MCP-Protocol-Version');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Expose-Headers', 'MCP-Session-ID');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+
+  next();
+});
+
 // Store for MCP transports, OAuth state
 const transports = new Map();
 const registeredClients = new Map(); // client_id -> { client_secret, redirect_uris }
