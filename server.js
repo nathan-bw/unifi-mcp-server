@@ -1005,9 +1005,10 @@ function validateOrigin(req, res, next) {
     return next();
   }
 
-  // Allow localhost for development
   try {
     const originUrl = new URL(origin);
+
+    // Allow localhost for development
     if (originUrl.hostname === 'localhost' || originUrl.hostname === '127.0.0.1') {
       return next();
     }
@@ -1015,6 +1016,12 @@ function validateOrigin(req, res, next) {
     // Allow requests from same origin
     const baseUrl = new URL(BASE_URL);
     if (originUrl.hostname === baseUrl.hostname) {
+      return next();
+    }
+
+    // Allow Cloudflare domains (MCP Portal, Playground, Dashboard)
+    if (originUrl.hostname.endsWith('.cloudflare.com') ||
+        originUrl.hostname.endsWith('.cloudflareaccess.com')) {
       return next();
     }
   } catch (e) {
