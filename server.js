@@ -572,29 +572,6 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// CORS middleware - allow cross-origin requests for browser-based MCP clients
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-
-  // For public servers, allow all origins (echo back the requesting origin)
-  // CORS is a browser security feature; server-side auth (OAuth) provides real security
-  if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
-
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, MCP-Session-ID, MCP-Protocol-Version');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Expose-Headers', 'MCP-Session-ID');
-
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-
-  next();
-});
-
 // Store for MCP transports, OAuth state
 const transports = new Map();
 const registeredClients = new Map(); // client_id -> { client_secret, redirect_uris }
@@ -688,17 +665,13 @@ app.get('/authorize', (req, res) => {
     return res.status(400).json({ error: 'invalid_request', error_description: 'client_id and redirect_uri required' });
   }
 
-  // Helper function to check if redirect_uri is trusted
-  // For public servers, allow any HTTPS redirect_uri or localhost
+  // Helper function to check if redirect_uri is trusted for auto-registration
+  // Only allow localhost for security (public clients with PKCE)
   const isTrustedRedirectUri = (uri) => {
     try {
       const url = new URL(uri);
-      // Allow localhost (Claude Desktop, local development)
+      // Only allow localhost (Claude Desktop, local MCP clients)
       if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
-        return true;
-      }
-      // Allow any HTTPS redirect_uri (public server, OAuth provides security)
-      if (url.protocol === 'https:') {
         return true;
       }
       return false;
@@ -995,33 +968,30 @@ app.get('/', (req, res) => {
 // =============================================================================
 
 // Origin validation middleware (required by MCP 2025-11-25 for DNS rebinding protection)
-// For public servers (not localhost), DNS rebinding is not a concern - allow all origins
-// For localhost servers, restrict to localhost origins only
+// Per spec: "Servers MUST validate the Origin header on all incoming connections"
 function validateOrigin(req, res, next) {
   const origin = req.headers.origin;
 
-  // Allow requests without Origin (non-browser/server-side clients)
+  // Allow requests without Origin (non-browser/server-side clients like CLI tools)
   if (!origin) {
     return next();
   }
 
-  // Check if this server is public (not localhost)
-  const baseUrl = new URL(BASE_URL);
-  const isPublicServer = baseUrl.hostname !== 'localhost' && baseUrl.hostname !== '127.0.0.1';
-
-  // Public servers: allow all origins (DNS rebinding not a concern)
-  if (isPublicServer) {
-    return next();
-  }
-
-  // Localhost servers: only allow localhost origins (DNS rebinding protection)
   try {
     const originUrl = new URL(origin);
+    const baseUrl = new URL(BASE_URL);
+
+    // Allow localhost origins (for local development and Claude Desktop)
     if (originUrl.hostname === 'localhost' || originUrl.hostname === '127.0.0.1') {
       return next();
     }
+
+    // Allow same-origin requests
+    if (originUrl.hostname === baseUrl.hostname) {
+      return next();
+    }
   } catch (e) {
-    // Invalid origin URL
+    // Invalid origin URL - reject
   }
 
   console.warn(`[MCP] Rejected request from origin: ${origin}`);
