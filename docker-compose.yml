@@ -17,7 +17,7 @@ services:
     # Environment variables from .env file
     environment:
       - NODE_ENV=production
-      - PORT=${PORT:-3000}
+      - PORT=3000
       - BASE_URL=${BASE_URL:-http://localhost:3000}
       # Cloudflare Access for SaaS (OAuth)
       - CF_ACCESS_TEAM=${CF_ACCESS_TEAM}
@@ -31,11 +31,12 @@ services:
       - NODE_TLS_REJECT_UNAUTHORIZED=0
 
     # Expose port to host
-    # Your Cloudflare tunnel will connect to this port
+    # Change HOST_PORT in .env to use a different port (default: 3001)
+    # Cloudflare tunnel should connect to this host port
     ports:
-      - "${PORT:-3000}:3000"
+      - "${HOST_PORT:-3001}:3000"
 
-    # Health check
+    # Health check (always port 3000 inside container)
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
       interval: 30s
